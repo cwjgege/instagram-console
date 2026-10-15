@@ -12,9 +12,25 @@ import device_manager as dm
 class DeviceWindow:
     def __init__(self,panel):
         self.panel=panel;self.events=queue.Queue();self.busy=False;self.devices=[];self.team_map={}
-        self.window=tk.Toplevel(panel.root);self.window.title('设备配置与签名');self.window.geometry('780x690')
-        self.window.minsize(700,650)
-        body=ttk.Frame(self.window,padding=22);body.pack(fill='both',expand=True)
+        self.window=tk.Toplevel(panel.root);self.window.title('设备配置与签名')
+        self.window.geometry(f'820x{min(800,max(560,self.window.winfo_screenheight()-100))}')
+        self.window.minsize(620,540)
+        # Reserve results and actions before allocating the scrollable form.
+        footer=ttk.Frame(self.window,padding=(18,12));footer.pack(side='bottom',fill='x')
+        self.status=tk.StringVar(value='准备就绪。')
+        self.status_label=ttk.Label(footer,textvariable=self.status,wraplength=760)
+        self.status_label.pack(fill='x',pady=(0,8))
+        self.progress=ttk.Progressbar(footer,mode='indeterminate');self.progress.pack(fill='x',pady=(0,10))
+        area=ttk.Frame(self.window);area.pack(fill='both',expand=True)
+        self.canvas=tk.Canvas(area,highlightthickness=0,borderwidth=0)
+        scrollbar=ttk.Scrollbar(area,orient='vertical',command=self.canvas.yview)
+        scrollbar.pack(side='right',fill='y');self.canvas.pack(side='left',fill='both',expand=True)
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        body=ttk.Frame(self.canvas,padding=22)
+        self.form_id=self.canvas.create_window((0,0),window=body,anchor='nw')
+        body.bind('<Configure>',lambda event:self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        self.canvas.bind('<Configure>',lambda event:self.resize_form(event,body))
+        self.window.bind('<MouseWheel>',self.scroll_form,add='+')
         ttk.Label(body,text='连接 iPhone，完成首次配置',font=('PingFang SC',20,'bold')).pack(anchor='w')
         ttk.Label(body,text='1  检查 Xcode  →  2  选择 USB 设备  →  3  签名安装  →  4  开始使用',wraplength=720).pack(anchor='w',pady=(8,16))
         self.environment=tk.StringVar(value='正在检测环境…')
@@ -40,17 +56,25 @@ class DeviceWindow:
         ttk.Spinbox(row,from_=1,to=168,textvariable=self.hours,width=6).pack(side='left',padx=10)
         ttk.Button(row,text='保存提醒设置',command=self.save_reminder).pack(side='left')
         ttk.Label(body,text='提醒在应用打开时检查；应用关闭后不会在后台提醒。\n手机需开启开发者模式并保持解锁。Xcode、信任和系统验证需要首次手动完成。',wraplength=710).pack(anchor='w',pady=(0,12))
-        actions=ttk.Frame(body);actions.pack(fill='x')
+        actions=ttk.Frame(footer);actions.pack(fill='x')
         self.install_button=ttk.Button(actions,text='安装 / 重新签名控制组件',command=self.install)
         self.install_button.pack(side='left')
         self.use_button=ttk.Button(actions,text='使用所选设备',command=self.use_device)
         self.use_button.pack(side='left',padx=12)
-        self.progress=ttk.Progressbar(body,mode='indeterminate');self.progress.pack(fill='x',pady=(14,8))
-        self.status=tk.StringVar(value='准备就绪。')
-        ttk.Label(body,textvariable=self.status,wraplength=710).pack(anchor='w')
         self.window.protocol('WM_DELETE_WINDOW',self.close)
         self.window.after(200,self.poll);self.window.after(15000,self.auto_scan)
         self.scan()
+
+    def resize_form(self,event,body):
+        self.canvas.itemconfigure(self.form_id,width=event.width)
+        for widget in body.winfo_children():
+            if isinstance(widget,ttk.Label):widget.configure(wraplength=max(260,event.width-48))
+        self.status_label.configure(wraplength=max(260,self.window.winfo_width()-48))
+
+    def scroll_form(self,event):
+        if event.widget.winfo_class() in ('TCombobox','TSpinbox'):return
+        if self.canvas.yview()!=(0.0,1.0) and event.delta:
+            self.canvas.yview_scroll(-1 if event.delta>0 else 1,'units')
 
     def selected(self):
         index=self.device_box.current()
@@ -77,7 +101,8 @@ class DeviceWindow:
             if FROZEN:dm.prepare_vendor(lambda message:self.events.put(('status',message)))
             devices=dm.scan_devices();teams=dm.signing_teams()
             self.events.put(('scanned',(directory,devices,teams)))
-        self.status.set('正在检测 Xcode、USB 设备与签名团队…');self.task(job)
+        if not getattr(self,'last_result',''):self.status.set('正在检测 Xcode、USB 设备与签名团队…')
+        self.task(job)
 
     def auto_scan(self):
         if not self.window.winfo_exists():return
@@ -108,21 +133,27 @@ class DeviceWindow:
         def job():
             record=dm.provision(device,team,lambda message:self.events.put(('status',message)))
             self.events.put(('installed',(device,record)))
+        self.last_result=''
+        self.status.set('正在安装并验证控制组件；手机出现图标后仍需等待完成。')
         self.task(job)
 
     def use_device(self):
         device=self.selected()
-        if not device:return
+        if not device:
+            self.status.set('未选择 USB iPhone，请连接手机并重新检测。');return
         if self.panel.worker and self.panel.worker.is_alive():self.status.set('请先停止当前浏览任务。');return
         record=dm.signing_record(device['udid'])
         if dm.expiry_state(record)[0] in ('unknown','expired'):
-            self.status.set('请先安装或重新签名控制组件。');return
+            message='当前设备没有有效安装记录，无法开始浏览。请先点击“安装 / 重新签名控制组件”，等待显示签名有效；失败详情见 appium.log。'
+            self.status.set(message);self.last_result=message
+            messagebox.showwarning('设备配置尚未完成',message,parent=self.window);return
         if not self.panel.save_settings(quiet=True):return
         self.panel.cfg.update(device_udid=device['udid'],device_name=device['name'],runtime_dir=str(dm.device_dir(device['udid'])))
         dm.write_json(DATA/'config.json',self.panel.cfg)
         self.panel.device_label.set(device['name']+' · USB 实机控制 · 手动运行')
         self.panel.status.set('设备已配置，可点击开始浏览。');self.panel.update_signature()
-        self.status.set('已选择 '+device['name']+'。现在可以关闭本窗口并开始浏览。')
+        self.last_result='已选择 '+device['name']+'。现在可以关闭本窗口并开始浏览。'
+        self.status.set(self.last_result)
 
     def save_reminder(self):
         try:
@@ -156,7 +187,8 @@ class DeviceWindow:
                     self.team_map={name+' · '+team:team for team,name in teams.items()}
                     self.team_box.configure(values=list(self.team_map))
                     self.team.set(old_team or next(iter(self.team_map),''))
-                    self.show_device();self.status.set('检测完成。选择设备与签名团队后安装。')
+                    self.show_device()
+                    if not getattr(self,'last_result',''):self.status.set('检测完成。选择设备与签名团队后安装。')
                 elif event=='installed':
                     device,record=value
                     self.show_device();self.use_device()
@@ -166,7 +198,8 @@ class DeviceWindow:
                     self.busy=False;self.progress.stop()
                     self.install_button.configure(state='normal');self.use_button.configure(state='normal')
                     self.device_box.configure(state='readonly');self.team_box.configure(state='normal')
-                elif event=='error':self.status.set(value)
+                elif event=='error':
+                    self.last_result=value;self.status.set(value)
                 else:self.status.set(value)
         except queue.Empty:pass
         self.window.after(200,self.poll)

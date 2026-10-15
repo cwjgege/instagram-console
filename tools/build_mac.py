@@ -28,7 +28,7 @@ def main():
          '--add-data',f'{STAGE / "default-config.json"}:.','--add-data',f'{archive}:.',
          '--add-data',f'{license_source}:licenses',SOURCE/'app_entry.py'],cwd=ROOT)
     app=ROOT/'dist/Instagram 控制台.app';info=app/'Contents/Info.plist'
-    values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString='1.1.4',CFBundleVersion='114',NSHighResolutionCapable=True)
+    values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString='1.1.5',CFBundleVersion='115',NSHighResolutionCapable=True)
     info.write_bytes(plistlib.dumps(values));run(['/usr/bin/codesign','--force','--deep','--sign','-',app])
     print(app)
 if __name__=='__main__':main()
