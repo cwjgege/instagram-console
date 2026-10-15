@@ -8,7 +8,7 @@
 
 [查看版本说明](https://github.com/cwjgege/instagram-console/releases/latest)
 
-本仓库为私有仓库。下载者需登录已获仓库访问权限的 GitHub 账号；这不是匿名公开下载地址。
+本仓库为公开仓库，安装包可直接下载，无需登录 GitHub。
 打开 DMG，将应用拖入 Applications。安装包内置 Python、Tcl/Tk、Pillow、Node、Appium 和 XCUITest 驱动。
 仍需在 Mac 安装完整 Xcode，并按应用向导完成 USB 信任、开发者模式和本机签名。
 手机与 Mac 无需使用同一个 Apple ID。
