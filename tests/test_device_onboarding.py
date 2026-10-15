@@ -27,5 +27,5 @@ class Onboarding(unittest.TestCase):
   import tempfile
   with tempfile.TemporaryDirectory() as folder,patch.object(dm,'DATA',Path(folder)):
    caps=dm.make_payload({'udid':'A'*20,'name':'Test'},'ABCDE12345')['capabilities']['alwaysMatch']
-  self.assertTrue(caps['appium:showXcodeLog']);self.assertTrue(caps['appium:allowProvisioningDeviceRegistration']);self.assertNotIn('appium:allowProvisioningUpdates',caps)
+  self.assertFalse(caps['appium:useNewWDA']);self.assertTrue(caps['appium:showXcodeLog']);self.assertTrue(caps['appium:allowProvisioningDeviceRegistration']);self.assertNotIn('appium:allowProvisioningUpdates',caps)
 if __name__=='__main__':unittest.main()

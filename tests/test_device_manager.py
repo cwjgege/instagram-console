@@ -21,6 +21,12 @@ class DeviceSetup(unittest.TestCase):
   self.assertEqual(c['appium:udid'],self.device['udid']);self.assertEqual(c['appium:xcodeOrgId'],'ABCDE12345')
   self.assertTrue(c['appium:derivedDataPath'].startswith(str(self.data)))
   self.assertNotIn('password',json.dumps(c).lower());self.assertTrue(c['appium:noReset'])
+ def test_provision_build_request_never_requests_phone_app_uninstall(self):
+  record={'expires_at':(datetime.now(timezone.utc)+timedelta(days=7)).isoformat()}
+  with patch.object(dm,'scan_devices',return_value=[self.device]),patch.object(dm,'check_xcode'),patch.object(dm,'ensure_server'),patch.object(dm,'close_other_sessions'),patch.object(dm,'profile_record',return_value=record),patch('runner.call',return_value={'sessionId':'new'}) as call:
+   dm.provision(self.device,'ABCDE12345')
+  caps=call.call_args.args[2]['capabilities']['alwaysMatch']
+  self.assertFalse(caps['appium:useNewWDA']);self.assertFalse(caps['appium:usePrebuiltWDA'])
  def test_reject_path_injection(self):
   with self.assertRaises(ValueError):dm.device_dir('../../other')
   with self.assertRaises(ValueError):dm.make_payload(self.device,'$(id)')

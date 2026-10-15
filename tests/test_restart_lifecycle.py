@@ -69,8 +69,19 @@ class SessionLifecycle(unittest.TestCase):
   with patch('runner.call',side_effect=[{},RuntimeError('invalid session id'),None,dict(sessionId='new',capabilities={'udid':'A'*20})]) as call:
    self.r.connect()
    self.assertEqual(call.call_args_list[2].args,('DELETE','/session/old'))
-   self.assertTrue(call.call_args_list[3].args[2]['capabilities']['alwaysMatch']['appium:useNewWDA'])
+   self.assertFalse(call.call_args_list[3].args[2]['capabilities']['alwaysMatch']['appium:useNewWDA'])
    self.assertEqual(self.r.path,'/session/new')
+ def test_old_saved_uninstall_flag_is_ignored_for_new_connection(self):
+  (self.base/'active-session.json').unlink()
+  (self.base/'session-request.json').write_text(json.dumps({'capabilities':{'alwaysMatch':{'appium:udid':'A'*20,'appium:useNewWDA':True}}}))
+  with patch('runner.call',side_effect=[{},dict(sessionId='new',capabilities={'udid':'A'*20})]) as call:
+   self.r.connect()
+   self.assertFalse(call.call_args.args[2]['capabilities']['alwaysMatch']['appium:useNewWDA'])
+ def test_forced_reconnect_does_not_uninstall_phone_component(self):
+  (self.base/'session-request.json').write_text(json.dumps({'capabilities':{'alwaysMatch':{'appium:udid':'A'*20,'appium:useNewWDA':True}}}))
+  with patch('runner.call',side_effect=[{},dict(sessionId='new',capabilities={'udid':'A'*20})]) as call:
+   self.r.connect(force_new=True)
+   self.assertFalse(call.call_args.args[2]['capabilities']['alwaysMatch']['appium:useNewWDA'])
  def test_finished_event_is_emitted_after_both_locks_released(self):
   self.r.connect=Mock();self.r.reels=Mock();observed=[]
   def notify(row):

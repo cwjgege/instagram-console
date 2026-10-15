@@ -257,12 +257,13 @@ class Runner:
         payload = json.loads((self.runtime / 'session-request.json').read_text())
         payload['capabilities']['alwaysMatch']['appium:wdaConnectionTimeout']=20000
         payload['capabilities']['alwaysMatch']['appium:waitForIdleTimeout']=1
+        # Old saved requests must not reset on-device developer trust by uninstalling WDA.
+        payload['capabilities']['alwaysMatch']['appium:useNewWDA']=False
         if force_new:
             if self.path:
                 try:call('DELETE',self.path,timeout=8)
                 except Exception:pass
             self.check()
-            payload['capabilities']['alwaysMatch']['appium:useNewWDA']=True
         if payload['capabilities']['alwaysMatch']['appium:udid'] != self.cfg['device_udid']:
             raise RuntimeError('设备标识不一致，已停止')
         if FROZEN:

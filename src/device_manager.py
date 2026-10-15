@@ -189,7 +189,7 @@ def make_payload(device,team):
         'appium:xcodeOrgId':team,'appium:xcodeSigningId':'Apple Development',
         'appium:updatedWDABundleId':'com.igconsole.wda.'+team.lower(),
         'appium:allowProvisioningDeviceRegistration':True,'appium:showXcodeLog':True,
-        'appium:usePrebuiltWDA':True,'appium:derivedDataPath':str(runtime/'DerivedData'),
+        'appium:useNewWDA':False,'appium:usePrebuiltWDA':True,'appium:derivedDataPath':str(runtime/'DerivedData'),
         'appium:wdaLocalPort':18100,'appium:mjpegServerPort':18101,
         'appium:wdaLaunchTimeout':120000,'appium:wdaConnectionTimeout':20000,
         'appium:waitForIdleTimeout':1,'appium:newCommandTimeout':300},'firstMatch':[{}]}}
@@ -245,8 +245,8 @@ def _provision(device,team,notify):
             old.unlink(missing_ok=True)
         payload=make_payload(fresh,team)
         build=json.loads(json.dumps(payload));caps=build['capabilities']['alwaysMatch']
-        caps['appium:usePrebuiltWDA']=False;caps['appium:useNewWDA']=True
-        notify('正在编译、签名并安装控制组件，首次可能需要几分钟。请保持手机解锁。')
+        caps['appium:usePrebuiltWDA']=False;caps['appium:useNewWDA']=False
+        notify('正在编译、签名并验证控制组件，不主动卸载旧控件。请保持手机解锁；若提示开发者未受信任，请在手机完成信任后重试。')
         try:value=call('POST','/session',build,timeout=360)
         except Exception as exc:
             raise RuntimeError('控制组件未完成安装或启动，不能开始浏览。详细 Xcode 错误已记录在 appium.log；请通过当前聊天发送日志以定位原因。') from exc
