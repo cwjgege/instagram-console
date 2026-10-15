@@ -1,0 +1,871 @@
+#!/usr/bin/env python3
+"""Bounded manual Instagram sessions on one explicitly configured physical iPhone."""
+import argparse
+import base64
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import random
+import signal
+import subprocess
+import threading
+import time
+import queue
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from zoneinfo import ZoneInfo
+import ai_comments
+from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
+
+ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
+AUTOMATION_DEFAULTS = dict(recovery_enabled=True,recovery_attempts=3,recovery_run_limit=5,
+    gesture_left=30,gesture_right=58,gesture_top=28,gesture_bottom=66,
+    gesture_distance_min=22,gesture_distance_max=32,gesture_duration_min=220,gesture_duration_max=480,
+    reconnect_enabled=True,reconnect_limit=2,close_business_chat=True,usb_wait_seconds=60,
+    search_videos_per_query=2,search_result_scrolls=1,search_watch_min=10,search_watch_max=20)
+
+def validate_motion(cfg):
+    for low,high,minimum,maximum in [('gesture_left','gesture_right',20,65),
+        ('gesture_top','gesture_bottom',22,70),('gesture_distance_min','gesture_distance_max',15,40),
+        ('gesture_duration_min','gesture_duration_max',180,800)]:
+        if not minimum<=cfg[low]<=cfg[high]<=maximum:
+            raise ValueError(f'{low} / {high} 须按从小到大填写，范围 {minimum}～{maximum}')
+    if cfg['gesture_distance_max']>=cfg['gesture_bottom']-cfg['gesture_top']:
+        raise ValueError('最大滑动距离必须小于安全区高度')
+    if not 1<=cfg['reconnect_limit']<=3:raise ValueError('本轮重连上限须为 1～3')
+    if not 15<=cfg.get('usb_wait_seconds',60)<=180:raise ValueError('USB 重新接入等待须为 15～180 秒')
+    if not (1<=cfg.get('search_videos_per_query',2)<=5 and 1<=cfg.get('search_result_scrolls',1)<=3
+        and 5<=cfg.get('search_watch_min',10)<=cfg.get('search_watch_max',20)<=90):
+        raise ValueError('搜索视频数须为 1～5，滚动次数为 1～3，观看时长为 5～90 秒且从小到大')
+
+class TransportLost(RuntimeError):
+    pass
+
+def transport_error(exc):
+    text=str(exc).casefold()
+    return isinstance(exc,(TimeoutError,ConnectionError)) or any(s in text for s in (
+        'socket hang up','connection refused','connection reset','timed out','invalid session id',
+        'could not proxy command','remote end closed','econnreset','econnrefused',
+        'unknown device or simulator udid'))
+
+class Halt(Exception):
+    pass
+
+class NavigationLost(RuntimeError):
+    """Recoverable navigation loss; never used for an unconfirmed write result."""
+    pass
+
+def atomic_json(path, value):
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
+    tmp.replace(path)
+
+def call(method, path, data=None, timeout=35):
+    req = Request(SERVER + path, None if data is None else json.dumps(data).encode(),
+                  {'Content-Type': 'application/json'}, method=method)
+    try:
+        with urlopen(req, timeout=timeout) as r:
+            value = json.load(r)['value']
+    except HTTPError as e:
+        raw=e.read().decode(errors='replace')
+        try:message=json.loads(raw).get('value',{}).get('message',raw)
+        except (ValueError,AttributeError):message=raw
+        raise RuntimeError(message[:1200]) from e
+    if isinstance(value, dict) and value.get('error'):
+        raise RuntimeError(str(value))
+    return value
+
+class Runner:
+    def __init__(self, config, stop=None, notify=None, seconds=None, browse_only=False, model_api_key=None, analysis_only=False):
+        self.cfg = {**AUTOMATION_DEFAULTS,**ai_comments.DEFAULTS,**config}
+        validate_motion(self.cfg)
+        config = self.cfg
+        self.model_api_key=ai_comments.api_key(model_api_key,config['ai_provider'])
+        self.analysis_only=analysis_only
+        self.ai_cache={}
+        self.ai_missing_warned=False
+        self.stop = stop or threading.Event()
+        self.notify = notify or print
+        self.seconds = seconds if seconds is not None else float(config['minutes']) * 60
+        self.browse_only = browse_only
+        self.runtime = Path(config['runtime_dir'])
+        self.rng = random.SystemRandom()
+        self.path = None
+        self.deadline = None
+        self.swipes = self.searches = self.back_depth = self.position = 0
+        self.counts = dict(likes=0, saves=0, comments=0, watched=0)
+        self.day = datetime.now(ZoneInfo(config['timezone'])).strftime('%Y-%m-%d')
+        self.run_id = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+        self.log_dir = self.runtime / 'runs' / self.run_id
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.ledger_path = self.runtime / 'interaction-ledger.json'
+        self.ledger = json.loads(self.ledger_path.read_text()) if self.ledger_path.exists() else {}
+        self.ledger.setdefault(self.day, {'likes':0,'saves':0,'comments':0,'posts':{},'comment_texts':[]})
+        self.daily = self.ledger[self.day]
+        self.daily.setdefault('ai_calls',0)
+        self.stagnant = 0
+        self.recoveries = 0
+        self.recovery_times = []
+        self.unchanged_swipes = 0
+        self.search_videos = 0
+        self.navigation_epoch = 0
+        self.reconnections = 0
+        self.in_interaction = False
+        self.refresh_required = False
+
+    def log(self, event, **details):
+        row = {'time':datetime.now().isoformat(timespec='seconds'),'event':event,**details}
+        with (self.log_dir / 'events.jsonl').open('a') as f:
+            f.write(json.dumps(row, ensure_ascii=False) + '\n')
+        self.notify(row)
+
+    def check(self):
+        if self.stop.is_set() or (self.runtime / 'STOP').exists():
+            raise Halt('已手动停止')
+        if self.deadline and time.monotonic() >= self.deadline:
+            raise Halt('本次时长已到')
+
+    def wait(self, seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.check()
+            self.stop.wait(min(.25, max(0, end-time.monotonic())))
+
+    def command(self, method, suffix, data=None):
+        self.check()
+        readonly=method=='GET' or suffix=='/elements' or (
+            suffix=='/execute/sync' and (data or {}).get('script')=='mobile: activeAppInfo')
+        try:
+            return call(method, self.path + suffix, data)
+        except Exception as exc:
+            if suffix=='/actions' and transport_error(exc):
+                raise TransportLost('滑动时控制连接中断，放弃该动作并重新识别') from exc
+            if not readonly or not transport_error(exc):raise
+            # Only reads can be retried. Never replay a click, input, or gesture.
+            self.log('read_retry',message='页面读取连接异常，短暂等待后重试')
+            self.wait(.8)
+            try:return call(method,self.path+suffix,data)
+            except Exception as retry:
+                if transport_error(retry):raise TransportLost('手机控制连接中断') from retry
+                raise
+
+    def mobile(self, name, **args):
+        try:return self.command('POST','/execute/sync',{'script':'mobile: '+name,'args':[args]})
+        except Exception as exc:
+            if name=='activateApp' and transport_error(exc):
+                raise TransportLost('启动 Instagram 时控制连接失效，需要重新连接') from exc
+            raise
+
+    def find(self, name, optional=False):
+        found = self.command('POST','/elements',{'using':'accessibility id','value':name})
+        for entry in found:
+            eid=entry.get(ELEMENT) or entry.get('ELEMENT')
+            if self.command('GET','/element/'+eid+'/displayed'):
+                return eid
+        if optional:
+            return None
+        raise RuntimeError('未找到页面控件：' + name)
+
+    def click(self, name):
+        eid = self.find(name)
+        try:self.command('POST','/element/'+eid+'/click',{})
+        except Exception as exc:
+            if name in ('reels-tab','BackButton','explore-tab') and transport_error(exc):
+                raise TransportLost('导航时控制连接中断，需重新识别页面') from exc
+            raise
+
+    def snapshot(self):
+        info = self.mobile('activeAppInfo')
+        if info.get('bundleId') != 'com.burbn.instagram':
+            raise NavigationLost('Instagram 已离开前台')
+        raw = self.command('GET','/source')
+        tree = ET.fromstring(raw)
+        visible = [e for e in tree.iter() if e.get('visible')=='true']
+        if any(e.tag == 'XCUIElementTypeAlert' for e in visible):
+            raise RuntimeError('出现系统或应用弹窗，请手动处理后重新开始')
+        return tree
+
+    def wait_for_usb(self):
+        from device_manager import scan_devices
+        end=time.monotonic()+self.cfg['usb_wait_seconds']
+        announced=False
+        while True:
+            self.check()
+            devices=scan_devices()
+            if any(d['udid']==self.cfg['device_udid'] for d in devices):
+                if announced:self.log('device_ready',message='指定 iPhone 已重新通过 USB 接入')
+                return
+            if not announced:
+                self.log('device_wait',message='未检测到指定 iPhone 的 USB 连接，等待重新接入；请检查线缆并解锁手机',seconds=self.cfg['usb_wait_seconds'])
+                announced=True
+            if time.monotonic()>=end:
+                raise RuntimeError('等待 USB 重新接入超时。请重新连接、解锁这台 iPhone 后再开始；不会切换到其他手机或网络连接')
+            self.wait(min(3,max(0,end-time.monotonic())))
+
+    def connect(self, force_new=False):
+        self.log('connecting', message='正在连接指定 iPhone')
+        self.wait_for_usb()
+        if FROZEN:
+            from device_manager import ensure_server,child_env,prepare_vendor
+            ensure_server(lambda message:self.log('connecting',message=message))
+            self.device_env=child_env(prepare_vendor())
+        try:
+            call('GET','/status',timeout=3)
+        except Exception:
+            if FROZEN:raise RuntimeError('内置控制服务未能连接，请打开设备配置检查。')
+            env = os.environ.copy()
+            env['PATH'] = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:' + env.get('PATH','')
+            self.server_log = (self.runtime / 'server-console.log').open('a')
+            subprocess.Popen(['/bin/zsh',str(self.runtime/'start-server.sh')],env=env,
+                             stdout=self.server_log,stderr=subprocess.STDOUT,start_new_session=True)
+            for _ in range(30):
+                self.wait(1)
+                try:
+                    call('GET','/status',timeout=2)
+                    break
+                except Exception:
+                    continue
+            else:
+                raise RuntimeError('Appium 服务未能启动')
+        state = self.runtime / 'active-session.json'
+        if state.exists() and not force_new:
+            old = json.loads(state.read_text())
+            caps = old.get('capabilities',{})
+            if caps.get('udid',caps.get('appium:udid')) == self.cfg['device_udid']:
+                try:
+                    self.path = '/session/' + old['sessionId']
+                    self.log('connecting',message='正在检查上次的手机控制连接…')
+                    info=call('POST',self.path+'/execute/sync',{'script':'mobile: activeAppInfo','args':[{}]},timeout=15)
+                    if not isinstance(info,dict) or not info.get('bundleId'):
+                        raise RuntimeError('旧连接未返回当前应用信息')
+                    self.check()
+                    self.log('connected', message='已连接 iPhone')
+                    return
+                except Halt:
+                    raise
+                except Exception:
+                    self.log('session_stale',message='上次连接已失效，清理后重新建立连接')
+                    try:call('DELETE',self.path,timeout=8)
+                    except Exception:pass
+                    state.unlink(missing_ok=True)
+                    self.path = None
+                    force_new=True
+        payload = json.loads((self.runtime / 'session-request.json').read_text())
+        payload['capabilities']['alwaysMatch']['appium:wdaConnectionTimeout']=20000
+        payload['capabilities']['alwaysMatch']['appium:waitForIdleTimeout']=1
+        if force_new:
+            if self.path:
+                try:call('DELETE',self.path,timeout=8)
+                except Exception:pass
+            self.check()
+            payload['capabilities']['alwaysMatch']['appium:useNewWDA']=True
+        if payload['capabilities']['alwaysMatch']['appium:udid'] != self.cfg['device_udid']:
+            raise RuntimeError('设备标识不一致，已停止')
+        if FROZEN:
+            from device_manager import close_other_sessions
+            close_other_sessions()
+        self.log('connecting',message='正在建立手机控制会话，停止时需等待当前连接命令结束…')
+        value = call('POST','/session',payload,timeout=240)
+        atomic_json(state,value)
+        self.path = '/session/' + value['sessionId']
+        self.check()
+        self.log('connected', message='已连接 iPhone')
+
+    def recover_connection(self):
+        self.check()
+        if self.in_interaction:
+            raise RuntimeError('互动过程中连接中断，结果未确认，已停止且不会重发')
+        if not self.cfg['reconnect_enabled']:
+            raise RuntimeError('控制连接中断，自动重连已关闭')
+        while self.reconnections<self.cfg['reconnect_limit']:
+            self.reconnections+=1
+            self.log('reconnecting',message='正在重新建立手机控制连接',reconnections=self.reconnections)
+            self.wait(2)
+            try:
+                self.connect(force_new=True)
+                self.recover_reels()
+            except Halt:raise
+            except Exception as exc:
+                if isinstance(exc,TransportLost) or transport_error(exc):continue
+                raise
+            self.log('reconnected',message='连接已恢复，重新识别视频后继续')
+            return
+        raise RuntimeError('控制连接恢复失败，本轮重连次数已用完')
+
+    def reels(self):
+        self.mobile('activateApp',bundleId='com.burbn.instagram')
+        self.wait(1)
+        for _ in range(4):
+            if self.find('reels-tab',optional=True):
+                break
+            if self.find('back-button',optional=True):
+                self.click('back-button')
+                self.wait(.7)
+            elif self.find('BackButton',optional=True):
+                self.click('BackButton')
+                self.wait(.7)
+            elif self.find('Cancel',optional=True):
+                self.click('Cancel')
+                self.wait(.7)
+            else:
+                raise NavigationLost('未找到 Instagram 主页面入口')
+        self.click('reels-tab')
+        self.wait(1)
+        self.read_reel()
+
+    def read_reel(self):
+        for attempt in range(3):
+            tree = self.snapshot()
+            nodes = [e for e in tree.iter() if e.get('visible')=='true']
+            names = {e.get('name') for e in nodes}
+            is_reels=any(e.get('name')=='reels-tab' and e.get('value')=='1' for e in nodes) or 'Reels' in names or ('reels-viewer' in names and 'sundial-viewer-video-collection-view' in names)
+            modal='ig-partial-modal-sheet-view-controller-content' in names
+            input_open=any(e.tag in ('XCUIElementTypeTextField','XCUIElementTypeTextView','XCUIElementTypeSecureTextField') for e in nodes)
+            if is_reels and not modal and not input_open and 'like-button' in names and 'comment-button' in names:
+                break
+            if attempt<2:
+                self.wait(.7)
+        else:
+            raise NavigationLost('当前不是可识别的 Reels 页面')
+        author = next((e.get('label','')[8:] for e in nodes if e.get('label','').startswith('Post by ')), '')
+        captions = []
+        for e in nodes:
+            if 'caption' in e.get('name','').lower():
+                captions.extend(x.get('label','') for x in e.iter() if x.tag=='XCUIElementTypeStaticText')
+        caption = '\n'.join(dict.fromkeys(captions)).strip()
+        # An absent caption is not enough evidence to identify a video or interact.
+        key = hashlib.sha256((author+'\n'+caption).encode()).hexdigest()[:24] if author and caption else None
+        return {'author':author,'caption':caption,'key':key,'nodes':nodes}
+
+    def recover_reels(self):
+        """Navigate only with observed controls; abandon the previous post on recovery."""
+        self.check()
+        if not self.cfg.get('recovery_enabled',True):
+            raise RuntimeError('页面异常，自动恢复已关闭')
+        self.recovery_times=[t for t in self.recovery_times if time.monotonic()-t<300]
+        if len(self.recovery_times)>=self.cfg.get('recovery_run_limit',5):
+            raise RuntimeError('最近 5 分钟内页面恢复过于频繁，已停止，请检查手机页面或连接')
+        attempts=max(1,min(5,int(self.cfg.get('recovery_attempts',3))))
+        previous_action=None
+        self.log('recovering',message='页面识别异常，正在尝试恢复 Reels')
+        for attempt in range(attempts):
+            self.check()
+            try:
+                post=None if self.refresh_required and attempt==0 else self.read_reel()
+            except NavigationLost:
+                post=None
+            if post is not None:
+                self.recoveries+=1
+                self.recovery_times.append(time.monotonic())
+                self.navigation_epoch+=1
+                self.position=self.back_depth=self.stagnant=self.unchanged_swipes=0
+                self.refresh_required=False
+                self.log('recovered',message='已恢复 Reels，重新识别当前视频',recoveries=self.recoveries)
+                return post
+            info=self.mobile('activeAppInfo')
+            if info.get('bundleId')!='com.burbn.instagram':
+                self.mobile('activateApp',bundleId='com.burbn.instagram')
+                self.log('recovery_action',message='重新打开 Instagram',attempt=attempt+1)
+                self.wait(1)
+                previous_action='activate'
+                continue
+            tree=self.snapshot()  # System alerts are handled by snapshot and never auto-dismissed.
+            nodes=[e for e in tree.iter() if e.get('visible')=='true']
+            names={e.get('name') for e in nodes}
+            text=' '.join(e.get('label','') for e in nodes if e.tag=='XCUIElementTypeStaticText').casefold()
+            if any(marker in text for marker in ['confirm your identity','verify your identity','suspicious activity',
+                'try again later','we restrict certain activity','account has been suspended','security check',
+                '确认你的身份','验证你的身份','操作过于频繁','稍后重试']):
+                raise RuntimeError('出现验证、操作限制或账号提示，请手动处理')
+            fields=[e for e in nodes if e.tag in ['XCUIElementTypeTextField','XCUIElementTypeTextView','XCUIElementTypeSecureTextField']]
+            # An observed ad end card includes a default inquiry, not a composed DM.
+            # Close only this complete signature; modified input stays untouched.
+            known_chat=(self.cfg['close_business_chat'] and len(fields)==1
+                and fields[0].tag=='XCUIElementTypeTextField'
+                and fields[0].get('value')=='Hello, can I get more info on this?'
+                and any(e.get('label','').startswith('Business chat · ') for e in nodes)
+                and 'Have a question?\nChat with us' in names
+                and 'Send Message' in names
+                and sum(e.get('name')=='ig icon x pano outline 24' for e in nodes)==1
+                and not any(e.tag=='XCUIElementTypeKeyboard' for e in nodes)
+                and any(e.get('name')=='reels-tab' and e.get('value')=='1' for e in nodes))
+            if fields and not known_chat:
+                raise RuntimeError('页面包含输入框，已停止恢复，保留当前输入内容')
+            action=None
+            dismiss=[e for e in nodes if e.tag=='XCUIElementTypeButton' and e.get('label','').casefold()=='dismiss']
+            if known_chat:
+                self.click('ig icon x pano outline 24');action='close_business_chat'
+            elif 'ig-partial-modal-sheet-view-controller-content' in names and len(dismiss)==1:
+                found=self.command('POST','/elements',{'using':'-ios predicate string',
+                    'value':"type == 'XCUIElementTypeButton' AND visible == true AND label == 'Dismiss'"})
+                if len(found)==1:
+                    eid=found[0].get(ELEMENT) or found[0].get('ELEMENT')
+                    self.command('POST','/element/'+eid+'/click',{})
+                    action='close_sheet'
+            elif 'reels-tab' in names and previous_action!='reels':
+                self.click('reels-tab');action='reels'
+            elif 'back-button' in names and 'reels-viewer' in names:
+                self.click('back-button');action='back'
+            elif 'BackButton' in names:
+                self.click('BackButton');action='back'
+            elif 'reels-tab' in names:
+                selected=any(e.get('name')=='reels-tab' and e.get('value')=='1' for e in nodes)
+                if selected and previous_action!='swipe':
+                    self.gesture('down');action='swipe'
+                else:
+                    self.click('reels-tab');action='reels'
+            if action is None:
+                raise RuntimeError('没有识别到可靠的恢复入口，请手动返回 Reels')
+            self.log('recovery_action',message={'close_sheet':'关闭已识别的浮层','reels':'重新进入 Reels',
+                'back':'返回上一页','swipe':'在 Reels 内竖向滑动一次',
+                'close_business_chat':'关闭已识别的广告咨询面板，未发送消息'}[action],attempt=attempt+1)
+            previous_action=action
+            self.wait(1)
+        # Verify the last permitted action; do not spend another action on failure.
+        try:
+            post=self.read_reel()
+        except NavigationLost:
+            raise RuntimeError('页面恢复尝试已用完，请手动处理后重新开始') from None
+        self.recoveries+=1
+        self.recovery_times.append(time.monotonic())
+        self.navigation_epoch+=1
+        self.position=self.back_depth=self.stagnant=self.unchanged_swipes=0
+        self.refresh_required=False
+        self.log('recovered',message='已恢复 Reels，重新识别当前视频',recoveries=self.recoveries)
+        return post
+
+    def related(self, post):
+        caption = post['caption'].casefold()
+        return bool(post['key'] and any(t.casefold() in caption for t in self.cfg['relevance_terms'])
+                    and not any(t.casefold() in caption for t in self.cfg['exclude_keywords']))
+
+    def reserve(self, post, kind, text=None):
+        entry = self.daily['posts'].setdefault(post['key'],{})
+        if entry.get(kind) or self.daily[kind] >= self.cfg['max_'+kind+'_per_day']:
+            return False
+        # Reserve before sending: a network failure must never trigger a duplicate retry.
+        entry[kind] = 'pending'
+        self.daily[kind] += 1
+        if text:
+            self.daily['comment_texts'].append(text)
+        atomic_json(self.ledger_path,self.ledger)
+        return True
+
+    def completed(self, post, kind):
+        self.daily['posts'][post['key']][kind] = 'done'
+        self.counts[kind] += 1
+        atomic_json(self.ledger_path,self.ledger)
+        self.log(kind, message={'likes':'已点赞','saves':'已收藏','comments':'已评论'}[kind], author=post['author'])
+
+    def toggle_on(self, post, kind, name, allowed_labels):
+        current = self.read_reel()
+        if current['key'] != post['key']:
+            raise RuntimeError('视频发生变化，已停止互动')
+        button = next((e for e in current['nodes'] if e.get('name')==name),None)
+        if button is None or button.get('label','').casefold() not in allowed_labels:
+            return  # Already active, translated UI, or unknown state: never toggle off.
+        if not self.reserve(post,kind):
+            return
+        self.click(name)
+        self.wait(1)
+        after = self.read_reel()
+        label = next((e.get('label','').casefold() for e in after['nodes'] if e.get('name')==name),'')
+        expected = {'likes':{'unlike','unlike post'},'saves':{'remove from saved','unsave','unsave post'}}[kind]
+        if after['key'] == post['key'] and label in expected:
+            self.completed(post,kind)
+        else:
+            raise RuntimeError('互动结果无法确认，已停止；不会重试或重复点击')
+
+    def comment(self, post):
+        if self.cfg['comments_mode']=='ai':
+            return self.ai_comment(post)
+        return self.rule_comment(post)
+
+    def rule_comment(self, post):
+        caption = post['caption'].casefold()
+        reply = None
+        for rule in self.cfg['comment_rules']:
+            if any(term.casefold() in caption for term in rule['match_any']):
+                options = [r for r in rule['replies'] if r not in self.daily['comment_texts']]
+                if options:
+                    reply = self.rng.choice(options)
+                    break
+        if not reply:
+            return
+        self.send_comment(post,reply)
+
+    def send_comment(self,post,reply):
+        if not ai_comments.english_text(reply):
+            self.log('comment_skip',message='评论不是英文，已跳过')
+            return
+        if self.daily['posts'].get(post['key'],{}).get('comments'):
+            return
+        if self.daily['comments'] >= self.cfg['max_comments_per_day']:
+            return
+        if self.read_reel()['key'] != post['key']:
+            raise RuntimeError('视频已变化，跳过评论')
+        self.click('comment-button')
+        self.wait(1)
+        tree = self.snapshot()
+        fields = [e for e in tree.iter() if e.get('visible')=='true' and e.tag in ('XCUIElementTypeTextView','XCUIElementTypeTextField')]
+        if len(fields)!=1:
+            raise RuntimeError('无法唯一识别评论输入框，已停止')
+        field = fields[0]
+        locator = field.get('name')
+        if not locator:
+            raise RuntimeError('评论输入框没有可靠标识，已停止')
+        eid = self.find(locator)
+        self.command('POST','/element/'+eid+'/click',{})
+        self.command('POST','/element/'+eid+'/value',{'text':reply})
+        self.wait(.5)
+        tree = self.snapshot()
+        send = [e for e in tree.iter() if e.get('visible')=='true' and e.tag=='XCUIElementTypeButton'
+                and e.get('enabled')=='true' and e.get('label','').casefold() in ('post','post comment','send','发布','发送')]
+        if len(send)!=1 or not send[0].get('name'):
+            raise RuntimeError('无法唯一识别评论发送按钮，已停止；评论尚未发送')
+        if not self.reserve(post,'comments',reply):
+            raise RuntimeError('评论额度已用完，未发送')
+        self.click(send[0].get('name'))
+        self.wait(1)
+        tree = self.snapshot()
+        if not any(e.get('visible')=='true' and reply in e.get('label','') for e in tree.iter()):
+            raise RuntimeError('评论发送结果未确认，已停止；不会自动重发')
+        self.completed(post,'comments')
+        self.log('comment_text', text=reply)
+        self.close_comments()
+
+    def ai_comment(self,post,preview=False):
+        if not post['key']:
+            self.log('ai_skip',message='无法稳定识别当前视频，跳过评论')
+            return
+        if any(term.casefold() in post['caption'].casefold() for term in self.cfg['exclude_keywords']):
+            self.log('ai_skip',message='说明包含排除词，跳过 AI 评论')
+            return
+        if not preview and (self.daily['posts'].get(post['key'],{}).get('comments') or self.daily['comments']>=self.cfg['max_comments_per_day']):
+            return
+        if not self.model_api_key:
+            if not self.ai_missing_warned or preview:
+                self.log('ai_skip',message='未配置所选服务商的 API Key，跳过 AI 评论')
+                self.ai_missing_warned=True
+            return
+        if self.daily['ai_calls']>=self.cfg['ai_max_calls_per_day']:
+            self.log('ai_skip',message='今日模型调用次数已达上限，跳过')
+            return
+        if post['key'] in self.ai_cache and not preview:
+            return
+        self.ai_cache[post['key']]=None
+        frames=[]
+        self.log('ai_sampling',message='正在采样当前视频画面')
+        for i in range(self.cfg['ai_frames']):
+            if i:
+                self.wait(self.cfg['ai_frame_interval'])
+            if self.read_reel()['key']!=post['key']:
+                self.log('ai_skip',message='采样期间视频已切换，跳过')
+                return
+            screenshot=self.command('GET','/screenshot')
+            frames.append(ai_comments.frame_data(screenshot,self.runtime))
+        if self.read_reel()['key']!=post['key']:
+            self.log('ai_skip',message='视频已切换，丢弃采样')
+            return
+        previous=[text for day in sorted(self.ledger) for text in self.ledger[day].get('comment_texts',[])][-100:]
+        self.daily['ai_calls']+=1
+        atomic_json(self.ledger_path,self.ledger)
+        self.log('ai_request',message='正在理解画面并生成英文评论',model=self.cfg['ai_model'])
+        result_queue=queue.Queue()
+        def request_model():
+            try:
+                result_queue.put((True,ai_comments.generate(self.cfg,post['caption'],frames,previous,self.model_api_key)))
+            except Exception as exc:
+                message=str(exc) if isinstance(exc,ai_comments.AIUnavailable) else '模型处理异常，已跳过'
+                result_queue.put((False,message))
+        threading.Thread(target=request_model,daemon=True).start()
+        while True:
+            self.check()
+            try:
+                ok,result=result_queue.get(timeout=.2)
+                break
+            except queue.Empty:
+                continue
+        if not ok:
+            self.log('ai_skip',message=result)
+            return
+        self.ai_cache[post['key']]=result
+        atomic_json(self.log_dir/('ai-'+post['key']+'.json'),result)
+        self.log('ai_result',message='已生成评论' if result['accepted'] else '跳过：'+result['skip_reason'],
+                 summary=result['summary'],confidence=result['confidence'],comment=result['comment'],
+                 evidence=result['evidence'],accepted=result['accepted'])
+        if not result['accepted']:
+            return
+        if preview or self.cfg['ai_send_mode']=='preview':
+            self.log('ai_preview',message='仅预览，未发送评论',comment=result['comment'])
+            return
+        self.check()
+        if self.read_reel()['key']!=post['key']:
+            self.log('ai_skip',message='分析后视频已切换，未发送评论')
+            return
+        self.send_comment(post,result['comment'])
+
+    def close_comments(self):
+        # Dismiss only an explicitly identified Close control, never a random coordinate.
+        tree=self.snapshot()
+        candidates=[e for e in tree.iter() if e.get('visible')=='true' and e.tag=='XCUIElementTypeButton'
+                    and e.get('label','').casefold() in ('close','close comments','dismiss','关闭')]
+        if len(candidates)==1 and candidates[0].get('name'):
+            label=candidates[0].get('label')
+            found=self.command('POST','/elements',{'using':'-ios predicate string',
+                'value':"type == 'XCUIElementTypeButton' AND visible == true AND label == "+json.dumps(label)})
+            if len(found)!=1:
+                raise RuntimeError('评论关闭按钮无法唯一识别，已停止')
+            eid=found[0].get(ELEMENT) or found[0].get('ELEMENT')
+            self.command('POST','/element/'+eid+'/click',{})
+            self.wait(.5)
+            self.read_reel()
+        else:
+            raise RuntimeError('评论已处理，请手动关闭评论面板后重新开始')
+
+    def search(self, term):
+        if not ai_comments.english_text(term):
+            self.log('search_skip',message='搜索词不是英文，已跳过')
+            return
+        self.click('explore-tab')
+        self.wait(.7)
+        eid=self.find('search-text-input')
+        self.command('POST','/element/'+eid+'/click',{})
+        self.wait(.5)
+        eid=self.find('search-text-input')
+        self.command('POST','/element/'+eid+'/clear',{})
+        self.command('POST','/element/'+eid+'/value',{'text':term+'\n'})
+        self.wait(2)
+        tree=self.snapshot()
+        all_text=' '.join(e.get('label','')+' '+e.get('value','') for e in tree.iter() if e.get('visible')=='true')
+        if term not in all_text:
+            raise RuntimeError('无法确认搜索结果，已停止')
+        self.searches+=1
+        self.log('search', message='已搜索：'+term)
+        seen=set()
+        for index in range(int(self.cfg['search_videos_per_query'])):
+            tree=self.search_results(term)
+            nodes=[e for e in tree.iter() if e.get('visible')=='true']
+            candidates=[e for e in nodes if e.tag=='XCUIElementTypeCell'
+                and e.get('name')=='media-discovery-cell' and e.get('label','').startswith('Video by ')
+                and e.get('label') not in seen and float(e.get('y',0))>=143
+                and float(e.get('y',0))+float(e.get('height',0))<=850]
+            if not candidates:
+                self.log('search_skip',message='当前结果没有新的、可识别的视频，结束本次搜索浏览')
+                break
+            label=candidates[0].get('label');seen.add(label)
+            found=self.command('POST','/elements',{'using':'-ios predicate string','value':
+                "type == 'XCUIElementTypeCell' AND name == 'media-discovery-cell' AND visible == true AND label == "+json.dumps(label)})
+            if len(found)!=1:
+                self.log('search_skip',message='搜索视频控件不唯一，跳过')
+                break
+            self.command('POST','/element/'+found[0][ELEMENT]+'/click',{})
+            self.wait(1.5)
+            post=self.read_reel()
+            self.search_videos+=1;self.counts['watched']+=1
+            self.log('search_watch',message='观看搜索结果视频',query=term,author=post['author'],search_videos=self.search_videos)
+            self.wait(self.rng.uniform(self.cfg['search_watch_min'],self.cfg['search_watch_max']))
+            # Search browsing never sends social interactions. Return through the observed viewer control.
+            current=self.read_reel()
+            if 'back-button' not in {e.get('name') for e in current['nodes']}:
+                raise NavigationLost('搜索视频缺少可识别的返回入口')
+            self.click('back-button');self.wait(1)
+            self.search_results(term)
+            if index+1<int(self.cfg['search_videos_per_query']):
+                for _ in range(int(self.cfg['search_result_scrolls'])):
+                    self.search_results(term)
+                    self.gesture('up');self.wait(1)
+                    self.search_results(term)
+                    self.log('search_scroll',message='已滚动并重新确认搜索结果',query=term)
+        self.reels()
+
+    def search_results(self,term):
+        for attempt in range(3):
+            tree=self.snapshot()
+            nodes=[e for e in tree.iter() if e.get('visible')=='true']
+            fields=[e for e in nodes if e.tag=='XCUIElementTypeSearchField' and e.get('name')=='search-text-input']
+            if (len(fields)==1 and fields[0].get('value','').casefold()==term.casefold()
+                and any(e.get('name')=='search-for-you-serp' and e.get('value')=='1' for e in nodes)
+                and not any(e.get('name')=='ig-partial-modal-sheet-view-controller-content' or e.tag in ('XCUIElementTypeKeyboard','XCUIElementTypeTextField','XCUIElementTypeTextView') for e in nodes)):
+                return tree
+            if attempt<2:self.wait(1)
+        raise NavigationLost('搜索结果页面未能确认，返回浏览入口')
+
+
+    def gesture(self, direction):
+        if direction not in ('up','down'):raise ValueError('仅支持竖向滑动')
+        rect=self.command('GET','/window/rect')
+        w,h=rect['width'],rect['height'];c=self.cfg
+        distance=self.rng.uniform(c['gesture_distance_min'],c['gesture_distance_max'])/100*h
+        top,bottom=c['gesture_top']/100*h,c['gesture_bottom']/100*h
+        low=self.rng.uniform(top,bottom-distance);high=low+distance
+        x=self.rng.uniform(c['gesture_left'],c['gesture_right'])/100*w
+        y1,y2=(high,low) if direction=='up' else (low,high)
+        duration=round(self.rng.uniform(c['gesture_duration_min'],c['gesture_duration_max']))
+        x,y1,y2=round(x),round(y1),round(y2)
+        # One vertical stroke, inside the configured central safe rectangle.
+        self.command('POST','/actions',{'actions':[{'type':'pointer','id':'finger',
+            'parameters':{'pointerType':'touch'},'actions':[
+            {'type':'pointerMove','duration':0,'origin':'viewport','x':x,'y':y1},
+            {'type':'pointerDown','button':0},{'type':'pause','duration':50},
+            {'type':'pointerMove','duration':duration,'origin':'viewport','x':x,'y':y2},
+            {'type':'pointerUp','button':0}]}]})
+        self.log('gesture',message='已完成中央区域竖向滑动',direction=direction,
+                 start=[x,y1],end=[x,y2],duration_ms=duration)
+
+    def swipe(self, direction):
+        before=self.read_reel()
+        self.gesture(direction)
+        self.swipes+=1
+        self.position=max(0,self.position+(1 if direction=='up' else -1))
+        self.log('swipe',direction=direction,message='回看上一条' if direction=='down' else '切换下一条')
+        self.wait(self.rng.uniform(.8,1.5))
+        after=self.read_reel()
+        if before['key'] and after['key']==before['key']:
+            # A delayed accessibility tree or one short stroke is not navigation loss.
+            self.wait(2)
+            after=self.read_reel()
+        if before['key'] and after['key']==before['key']:
+            self.unchanged_swipes+=1
+            self.log('swipe_unchanged',message='本次未确认切换视频，保留页面并等待下一次翻页',consecutive=self.unchanged_swipes)
+            if self.unchanged_swipes>=3:
+                self.refresh_required=True
+                raise NavigationLost('连续三次滑动仍是同一视频，尝试恢复入口')
+        else:
+            self.unchanged_swipes=0
+        self.log('page_checked',message='滑动后已确认仍在 Reels')
+
+    def run(self):
+        lock=(self.runtime/'runner.lock').open('w')
+        try:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            self.log('error',message='另一个浏览任务正在运行')
+            self.log('finished',message='运行已结束',status='error',log_dir=str(self.log_dir))
+            return 'error'
+        status='complete'
+        device_guard=None
+        try:
+            self.runtime.joinpath('STOP').unlink(missing_ok=True)
+            device_guard=lock_device(self.cfg['device_udid'])
+            try:
+                self.connect()
+                self.reels()
+            except NavigationLost:
+                self.recover_reels()
+            except TransportLost:
+                self.recover_connection()
+            self.deadline=time.monotonic()+self.seconds
+            self.log('started',message='开始浏览',minutes=round(self.seconds/60,2))
+            if not self.browse_only and self.cfg['comments_mode']=='ai' and self.cfg['enable_comments'] and not self.model_api_key:
+                self.log('ai_skip',message='未配置 API Key，继续浏览并跳过 AI 评论')
+                self.ai_missing_warned=True
+            if self.analysis_only:
+                self.ai_comment(self.read_reel(),preview=True)
+                raise Halt('当前视频预览已完成，未发送评论')
+            next_search=time.monotonic()+self.rng.uniform(45,90)
+            last_key=None
+            while self.swipes < self.cfg['max_swipes_per_run']:
+                try:
+                    self.check()
+                    post=self.read_reel()
+                    self.counts['watched']+=1
+                    related=self.related(post)
+                    self.log('watch',message='观看相关视频' if related else '浏览视频',author=post['author'],related=related)
+                    if post['key'] and post['key']==last_key:
+                        self.stagnant+=1
+                    else:
+                        self.stagnant=0
+                    if self.stagnant>=3:
+                        self.refresh_required=True
+                        raise NavigationLost('连续翻页后仍停留同一内容')
+                    last_key=post['key']
+                    dwell=self.rng.uniform(12,30) if related else self.rng.uniform(3,10)
+                    if self.rng.random()<.12:
+                        dwell+=self.rng.uniform(10,25)
+                    self.wait(dwell)
+                    if related and not self.browse_only:
+                        self.in_interaction=True
+                        if self.cfg['enable_likes'] and self.rng.random()<self.cfg['like_probability']:
+                            self.toggle_on(post,'likes','like-button',{'like','like post'})
+                        if self.cfg['enable_saves'] and self.rng.random()<self.cfg['save_probability']:
+                            self.toggle_on(post,'saves','save-button',{'save','save post'})
+                        if self.cfg['enable_comments'] and self.cfg['comments_mode']!='ai' and self.rng.random()<self.cfg['comment_probability']:
+                            self.comment(post)
+                        self.in_interaction=False
+                    if (not self.browse_only and self.cfg['enable_comments'] and self.cfg['comments_mode']=='ai'
+                        and self.rng.random()<self.cfg['comment_probability']):
+                        self.in_interaction=True
+                        self.ai_comment(post)
+                        self.in_interaction=False
+                    if (not self.browse_only and self.cfg['enable_search'] and self.cfg['keywords']
+                        and self.searches<self.cfg['max_searches_per_run'] and time.monotonic()>=next_search):
+                        self.search(self.rng.choice(self.cfg['keywords']))
+                        next_search=time.monotonic()+self.rng.uniform(180,360)
+                        self.back_depth=0
+                        self.position=0
+                        continue
+                    if self.back_depth==0 and self.position>=2 and self.rng.random()<.1:
+                        burst=self.rng.choices([1,2],[.8,.2])[0]
+                        for _ in range(min(burst,self.position,self.cfg['max_swipes_per_run']-self.swipes)):
+                            self.swipe('down')
+                            self.wait(self.rng.uniform(2,5))
+                        self.back_depth=burst
+                    else:
+                        burst=self.rng.choices([1,2,3],[.8,.16,.04])[0]
+                        for _ in range(min(burst,self.cfg['max_swipes_per_run']-self.swipes)):
+                            self.swipe('up')
+                            if burst>1:
+                                self.wait(self.rng.uniform(1.5,3.5))
+                        self.back_depth=max(0,self.back_depth-burst)
+                except TransportLost:
+                    self.recover_connection()
+                    last_key=None
+                    continue
+                except NavigationLost as exc:
+                    if self.in_interaction:raise RuntimeError('互动时页面变化，已停止以避免误操作') from exc
+                    self.log('navigation_lost',message=str(exc))
+                    try:self.recover_reels()
+                    except TransportLost:self.recover_connection()
+                    last_key=None
+                    continue
+        except Halt as e:
+            self.log('stopped',message=str(e))
+            status='stopped' if self.stop.is_set() or (self.runtime/'STOP').exists() else 'complete'
+        except Exception as e:
+            status='error'
+            message='手机控制连接中断，当前动作结果未确认，已停止且不会重发' if transport_error(e) else str(e)
+            self.log('error',message=message,detail=str(e)[:1800])
+        finally:
+            summary={'status':status,'counts':self.counts,'swipes':self.swipes,'searches':self.searches,
+                     'log_dir':str(self.log_dir),'run_id':self.run_id,'recoveries':self.recoveries,
+                     'reconnections':self.reconnections,'search_videos':self.search_videos}
+            try:
+                atomic_json(self.log_dir/'summary.json',summary)
+                atomic_json(self.runtime/'last-run.json',summary)
+            finally:
+                fcntl.flock(lock,fcntl.LOCK_UN)
+                lock.close()
+                if device_guard:device_guard.close()
+            self.log('finished',message='运行已结束',**summary)
+        return status
+
+def main():
+    p=argparse.ArgumentParser()
+    p.add_argument('--seconds',type=float)
+    p.add_argument('--browse-only',action='store_true')
+    args=p.parse_args()
+    cfg=load_config()
+    stop=threading.Event()
+    signal.signal(signal.SIGTERM,lambda *_:stop.set())
+    signal.signal(signal.SIGINT,lambda *_:stop.set())
+    result=Runner(cfg,stop=stop,seconds=args.seconds,browse_only=args.browse_only).run()
+    raise SystemExit(1 if result=='error' else 0)
+
+if __name__=='__main__':
+    main()

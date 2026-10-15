@@ -1,0 +1,177 @@
+"""Nonblocking first-run guide and device/signature management window."""
+import json
+import queue
+import subprocess
+import threading
+import tkinter as tk
+from tkinter import ttk,messagebox
+from pathlib import Path
+from app_paths import DATA,FROZEN
+import device_manager as dm
+
+class DeviceWindow:
+    def __init__(self,panel):
+        self.panel=panel;self.events=queue.Queue();self.busy=False;self.devices=[];self.team_map={}
+        self.window=tk.Toplevel(panel.root);self.window.title('设备配置与签名');self.window.geometry('780x690')
+        self.window.minsize(700,650)
+        body=ttk.Frame(self.window,padding=22);body.pack(fill='both',expand=True)
+        ttk.Label(body,text='连接 iPhone，完成首次配置',font=('PingFang SC',20,'bold')).pack(anchor='w')
+        ttk.Label(body,text='1  检查 Xcode  →  2  选择 USB 设备  →  3  签名安装  →  4  开始使用',wraplength=720).pack(anchor='w',pady=(8,16))
+        self.environment=tk.StringVar(value='正在检测环境…')
+        ttk.Label(body,textvariable=self.environment,wraplength=720).pack(anchor='w')
+        row=ttk.Frame(body);row.pack(fill='x',pady=(8,16))
+        ttk.Button(row,text='重新检测连接',command=self.scan).pack(side='left')
+        ttk.Button(row,text='打开 Xcode',command=self.open_xcode).pack(side='left',padx=10)
+        ttk.Button(row,text='打开诊断日志',command=self.open_logs).pack(side='left')
+        ttk.Label(body,text='仅列出通过 USB 连接的 iPhone').pack(anchor='w')
+        self.device=tk.StringVar();self.device_box=ttk.Combobox(body,textvariable=self.device,state='readonly')
+        self.device_box.pack(fill='x',pady=(5,8));self.device_box.bind('<<ComboboxSelected>>',lambda _:self.show_device())
+        self.detail=tk.StringVar(value='请连接手机、解锁，并在手机上选择“信任此电脑”。')
+        ttk.Label(body,textvariable=self.detail,wraplength=710).pack(anchor='w')
+        ttk.Label(body,text='签名团队（与手机 Apple ID 无需相同）').pack(anchor='w',pady=(16,5))
+        self.team=tk.StringVar();self.team_box=ttk.Combobox(body,textvariable=self.team)
+        self.team_box.pack(fill='x')
+        ttk.Label(body,text='检测不到团队时：在 Xcode → Settings → Accounts 登录开发账号，\n完成证书配置后重新检测；也可输入该账号的 10 位 Team ID。',wraplength=710).pack(anchor='w',pady=(6,12))
+        self.signature=tk.StringVar(value='尚未读取签名。')
+        ttk.Label(body,textvariable=self.signature,wraplength=710).pack(anchor='w')
+        row=ttk.Frame(body);row.pack(fill='x',pady=(10,10))
+        ttk.Label(row,text='到期前提醒 / 小时').pack(side='left')
+        self.hours=tk.StringVar(value=str(panel.cfg.get('signature_warn_hours',48)))
+        ttk.Spinbox(row,from_=1,to=168,textvariable=self.hours,width=6).pack(side='left',padx=10)
+        ttk.Button(row,text='保存提醒设置',command=self.save_reminder).pack(side='left')
+        ttk.Label(body,text='提醒在应用打开时检查；应用关闭后不会在后台提醒。\n手机需开启开发者模式并保持解锁。Xcode、信任和系统验证需要首次手动完成。',wraplength=710).pack(anchor='w',pady=(0,12))
+        actions=ttk.Frame(body);actions.pack(fill='x')
+        self.install_button=ttk.Button(actions,text='安装 / 重新签名控制组件',command=self.install)
+        self.install_button.pack(side='left')
+        self.use_button=ttk.Button(actions,text='使用所选设备',command=self.use_device)
+        self.use_button.pack(side='left',padx=12)
+        self.progress=ttk.Progressbar(body,mode='indeterminate');self.progress.pack(fill='x',pady=(14,8))
+        self.status=tk.StringVar(value='准备就绪。')
+        ttk.Label(body,textvariable=self.status,wraplength=710).pack(anchor='w')
+        self.window.protocol('WM_DELETE_WINDOW',self.close)
+        self.window.after(200,self.poll);self.window.after(15000,self.auto_scan)
+        self.scan()
+
+    def selected(self):
+        index=self.device_box.current()
+        return self.devices[index] if 0<=index<len(self.devices) else None
+
+    def task(self,job):
+        if self.busy:return
+        self.busy=True;self.install_button.configure(state='disabled');self.use_button.configure(state='disabled')
+        self.device_box.configure(state='disabled');self.team_box.configure(state='disabled');self.progress.start(12)
+        def work():
+            try:job()
+            except Exception as exc:
+                self.events.put(('error',str(exc)))
+                DATA.mkdir(parents=True,exist_ok=True)
+                with (DATA/'device-setup.log').open('a') as log:
+                    log.write(str(exc)+'\n'+str(exc.__cause__ or '')[:5000]+'\n')
+            finally:self.events.put(('done',None))
+        threading.Thread(target=work,daemon=True).start()
+
+    def scan(self):
+        if self.busy:return
+        def job():
+            directory=dm.check_xcode()
+            if FROZEN:dm.prepare_vendor(lambda message:self.events.put(('status',message)))
+            devices=dm.scan_devices();teams=dm.signing_teams()
+            self.events.put(('scanned',(directory,devices,teams)))
+        self.status.set('正在检测 Xcode、USB 设备与签名团队…');self.task(job)
+
+    def auto_scan(self):
+        if not self.window.winfo_exists():return
+        if not self.busy and not (self.panel.worker and self.panel.worker.is_alive()):self.scan()
+        self.window.after(15000,self.auto_scan)
+
+    def show_device(self):
+        device=self.selected()
+        if not device:
+            self.detail.set('未检测到 USB iPhone。请连接、解锁、信任此电脑，然后重新检测。')
+            self.signature.set('尚未配置设备。');return
+        self.detail.set(f"{device['model']} · iOS {device['ios']} · 信任配对：{'已完成' if device['paired'] else '待完成'} · 开发者模式：{'已开启' if device['developer'] else '待开启'}\n设置 → 隐私与安全性 → 开发者模式；开启后需重启并确认。")
+        record=dm.signing_record(device['udid']);state,remaining=dm.expiry_state(record,int(self.panel.cfg.get('signature_warn_hours',48)))
+        self.signature.set('签名：尚未安装，请点击下方安装按钮。' if not record else
+            f"签名：{'已到期' if state=='expired' else '即将到期' if state=='soon' else '有效'} · 到期 {record['expires_at'][:10]} · 团队 {record['team_id']}")
+        if record:
+            team=record['team_id'];self.team.set(next((label for label,value in self.team_map.items() if value==team),team))
+
+    def install(self):
+        if self.busy:return
+        if self.panel.worker and self.panel.worker.is_alive():
+            self.status.set('请先停止浏览任务，再安装控制组件。');return
+        device=self.selected()
+        if not device:self.status.set('请先连接并选择 USB iPhone。');return
+        team=self.team_map.get(self.team.get(),self.team.get().strip())
+        if not __import__('re').fullmatch('[A-Z0-9]{10}',team):
+            self.status.set('请选择签名团队，或输入正确的 10 位 Team ID。');return
+        def job():
+            record=dm.provision(device,team,lambda message:self.events.put(('status',message)))
+            self.events.put(('installed',(device,record)))
+        self.task(job)
+
+    def use_device(self):
+        device=self.selected()
+        if not device:return
+        if self.panel.worker and self.panel.worker.is_alive():self.status.set('请先停止当前浏览任务。');return
+        record=dm.signing_record(device['udid'])
+        if dm.expiry_state(record)[0] in ('unknown','expired'):
+            self.status.set('请先安装或重新签名控制组件。');return
+        if not self.panel.save_settings(quiet=True):return
+        self.panel.cfg.update(device_udid=device['udid'],device_name=device['name'],runtime_dir=str(dm.device_dir(device['udid'])))
+        dm.write_json(DATA/'config.json',self.panel.cfg)
+        self.panel.device_label.set(device['name']+' · USB 实机控制 · 手动运行')
+        self.panel.status.set('设备已配置，可点击开始浏览。');self.panel.update_signature()
+        self.status.set('已选择 '+device['name']+'。现在可以关闭本窗口并开始浏览。')
+
+    def save_reminder(self):
+        try:
+            hours=int(self.hours.get())
+            if not 1<=hours<=168:raise ValueError()
+        except ValueError:self.status.set('提醒时间须为 1～168 小时。');return
+        self.panel.cfg['signature_warn_hours']=hours
+        dm.write_json(DATA/'config.json',self.panel.cfg);self.panel.update_signature()
+        self.status.set('提醒设置已保存。')
+
+    def open_xcode(self):
+        try:subprocess.Popen(['/usr/bin/open',str(dm.xcode_directory().parent.parent)])
+        except RuntimeError:subprocess.Popen(['/usr/bin/open','macappstore://apps.apple.com/app/id497799835'])
+
+    def open_logs(self):
+        DATA.mkdir(parents=True,exist_ok=True);subprocess.Popen(['/usr/bin/open',str(DATA)])
+
+    def poll(self):
+        if not self.window.winfo_exists():return
+        try:
+            while True:
+                event,value=self.events.get_nowait()
+                if event=='scanned':
+                    directory,devices,teams=value
+                    previous=self.selected();old_udid=previous['udid'] if previous else self.panel.cfg.get('device_udid')
+                    old_team=self.team.get();self.devices=devices
+                    self.environment.set('Xcode 已找到：'+str(directory.parent.parent)+' · 内置运行依赖已就绪')
+                    self.device_box.configure(values=[d['name']+' · '+d['model']+' · '+d['udid'][-8:] for d in devices])
+                    if devices:self.device_box.current(next((i for i,d in enumerate(devices) if d['udid']==old_udid),0))
+                    else:self.device.set('')
+                    self.team_map={name+' · '+team:team for team,name in teams.items()}
+                    self.team_box.configure(values=list(self.team_map))
+                    self.team.set(old_team or next(iter(self.team_map),''))
+                    self.show_device();self.status.set('检测完成。选择设备与签名团队后安装。')
+                elif event=='installed':
+                    device,record=value
+                    self.show_device();self.use_device()
+                    if dm.expiry_state(record,self.panel.cfg.get('signature_warn_hours',48))[0]=='soon':
+                        self.status.set('重新签名安装已完成，但有效期仍临近到期。请在 Xcode 更新证书或描述文件后重试。')
+                elif event=='done':
+                    self.busy=False;self.progress.stop()
+                    self.install_button.configure(state='normal');self.use_button.configure(state='normal')
+                    self.device_box.configure(state='readonly');self.team_box.configure(state='normal')
+                elif event=='error':self.status.set(value)
+                else:self.status.set(value)
+        except queue.Empty:pass
+        self.window.after(200,self.poll)
+
+    def close(self):
+        if self.busy:
+            self.status.set('配置仍在进行，请等待结束后关闭。');return
+        self.panel.device_window=None;self.window.destroy()

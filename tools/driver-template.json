@@ -1,0 +1,56 @@
+{
+  "drivers": {
+    "xcuitest": {
+      "pkgName": "appium-xcuitest-driver",
+      "version": "12.18.1",
+      "installType": "local",
+      "installSpec": "BUNDLED_AT_RUNTIME",
+      "installPath": "BUNDLED_AT_RUNTIME",
+      "appiumVersion": "^3.0.0-rc.2",
+      "automationName": "XCUITest",
+      "platformNames": [
+        "iOS",
+        "tvOS",
+        "watchOS"
+      ],
+      "mainClass": "XCUITestDriver",
+      "scripts": {
+        "build-wda": "./scripts/build-wda.mjs",
+        "open-wda": "./scripts/open-wda.mjs",
+        "tunnel-creation": "./scripts/tunnel-creation.mjs",
+        "download-wda": "./scripts/download-wda.mjs",
+        "download-wda-sim": "./scripts/download-wda-sim.mjs",
+        "sign-wda": "./scripts/sign-wda.mjs",
+        "image-mounter": "./scripts/image-mounter.mjs",
+        "list-real-devices": "./scripts/list-real-devices.mjs",
+        "cleanup-videos": "./scripts/cleanup-videos.mjs",
+        "pair-appletv": "./scripts/pair-appletv.mjs"
+      },
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema",
+        "type": "object",
+        "properties": {
+          "webdriveragent-port": {
+            "appiumCliDest": "wdaLocalPort",
+            "default": 8100,
+            "description": "Local port used for communication with WebDriverAgent",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false,
+        "title": "XCUITest Driver Configuration",
+        "description": "Appium configuration schema for the XCUITest driver."
+      },
+      "doctor": {
+        "checks": [
+          "./build/lib/doctor/required-checks.js",
+          "./build/lib/doctor/optional-checks.js"
+        ]
+      }
+    }
+  },
+  "plugins": {},
+  "schemaRev": 4
+}

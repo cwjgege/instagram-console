@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+node_modules/
+work/
+build/
+dist/
+*.app/
+*.dmg
+*.log
+.env*
+*.p12
+*.p8
+*.mobileprovision
+src/config.json

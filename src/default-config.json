@@ -1,0 +1,97 @@
+{
+  "recovery_enabled": true,
+  "recovery_attempts": 3,
+  "recovery_run_limit": 5,
+  "gesture_left": 30,
+  "gesture_right": 58,
+  "gesture_top": 28,
+  "gesture_bottom": 66,
+  "gesture_distance_min": 22,
+  "gesture_distance_max": 32,
+  "gesture_duration_min": 220,
+  "gesture_duration_max": 480,
+  "reconnect_enabled": true,
+  "reconnect_limit": 2,
+  "close_business_chat": true,
+  "ai_provider": "openai",
+  "comments_mode": "ai",
+  "ai_model": "gpt-4.1-mini",
+  "ai_confidence": 0.9,
+  "ai_frames": 4,
+  "ai_frame_interval": 2.5,
+  "ai_max_calls_per_day": 10,
+  "ai_max_words": 24,
+  "ai_style": "Friendly, natural, specific and understated. Mention one detail actually supported by the sampled video. No sales pitch, no income promises, no personal experience claims. Write in English only.",
+  "ai_allow_questions": false,
+  "ai_allow_emoji": false,
+  "ai_send_mode": "preview",
+  "comment_probability": 0.08,
+  "timezone": "Asia/Shanghai",
+  "minutes": 20,
+  "keywords": [
+    "AI video creation",
+    "AI video monetization",
+    "AI side hustle"
+  ],
+  "exclude_keywords": [
+    "politics",
+    "election",
+    "gambling",
+    "betting"
+  ],
+  "like_probability": 0.12,
+  "save_probability": 0.06,
+  "max_likes_per_day": 4,
+  "max_saves_per_day": 2,
+  "max_searches_per_run": 2,
+  "max_swipes_per_run": 120,
+  "review_candidates_per_run": 4,
+  "relevance_terms": [
+    "ai video",
+    "aivideo",
+    "ai filmmaking",
+    "ai film",
+    "text to video",
+    "text-to-video",
+    "ai side hustle",
+    "ai income",
+    "kling"
+  ],
+  "enable_likes": true,
+  "enable_saves": true,
+  "enable_search": true,
+  "enable_comments": false,
+  "max_comments_per_day": 2,
+  "comment_rules": [
+    {
+      "name": "AI video tutorial",
+      "match_any": [
+        "tutorial"
+      ],
+      "replies": [
+        "Thanks for sharing this AI video tutorial!"
+      ]
+    },
+    {
+      "name": "AI video workflow",
+      "match_any": [
+        "workflow"
+      ],
+      "replies": [
+        "Thanks for sharing your AI video workflow!"
+      ]
+    },
+    {
+      "name": "AI video prompts",
+      "match_any": [
+        "prompt"
+      ],
+      "replies": [
+        "Thanks for sharing these AI video prompt ideas!"
+      ]
+    }
+  ],
+  "signature_warn_hours": 48,
+  "device_udid": "",
+  "runtime_dir": "work/source-runtime"
+}
