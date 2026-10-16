@@ -81,6 +81,27 @@ class Degradation(unittest.TestCase):
  def test_return_from_focused_search_via_explore_with_search_box(self):
   self.r.snapshot=Mock(side_effect=[search(),self.explore_with_search(),REELS]);self.r.return_from_search()
   self.assertEqual(self.r.click.call_args_list,[unittest.mock.call('search-bar-back-button'),unittest.mock.call('reels-tab')])
+ def test_reels_reuses_fresh_result_tree_and_reads_only_after_navigation(self):
+  self.r.snapshot=Mock(return_value=self.explore_with_search());self.r.mobile=Mock();self.r.find=Mock()
+  self.r.read_reel=Mock(return_value={'key':'verified'})
+  self.r.reels(initial_tree=search())
+  self.assertEqual(self.r.click.call_args_list,[unittest.mock.call('search-bar-back-button'),unittest.mock.call('reels-tab')])
+  self.r.snapshot.assert_called_once();self.r.find.assert_not_called();self.r.mobile.assert_not_called()
+  self.r.read_reel.assert_called_once()
+ def test_reels_never_navigates_away_from_draft_or_security_page(self):
+  for tree in (search('private draft'),screen(('XCUIElementTypeAlert',{}))):
+   self.r.click.reset_mock();self.r.snapshot=Mock();self.r.read_reel=Mock()
+   with self.assertRaises((NavigationLost,PageBlocked)):self.r.reels(initial_tree=tree)
+   self.r.click.assert_not_called();self.r.snapshot.assert_not_called();self.r.read_reel.assert_not_called()
+ def test_reels_checks_destination_even_if_tab_click_returns_success(self):
+  self.r.read_reel=Mock(side_effect=NavigationLost('wrong destination'))
+  with self.assertRaises(NavigationLost):self.r.reels(initial_tree=EXPLORE)
+  self.r.click.assert_called_once_with('reels-tab')
+ def test_reels_uses_new_tree_after_every_back_and_never_clicks_hidden_tab(self):
+  tree=search();ET.SubElement(tree,'XCUIElementTypeButton',dict(visible='false',name='reels-tab'))
+  self.r.snapshot=Mock(return_value=search('private draft'));self.r.read_reel=Mock()
+  with self.assertRaises(NavigationLost):self.r.reels(initial_tree=tree)
+  self.r.click.assert_called_once_with('search-bar-back-button');self.r.read_reel.assert_not_called()
  def test_unknown_query_is_preserved_as_input(self):
   self.assertEqual(classify(search('private draft'),['AI video creation']).kind,'input_unknown')
  def test_login_and_verification_override_video_markers(self):

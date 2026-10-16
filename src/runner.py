@@ -335,34 +335,39 @@ class Runner:
             return
         raise RuntimeError('控制连接恢复失败，本轮重连次数已用完')
 
-    def reels(self):
-        self.mobile('activateApp',bundleId='com.burbn.instagram')
-        self.wait(1)
+    def reels(self, initial_tree=None):
+        # A caller may pass the tree it just verified, with no intervening action.
+        # Never retain this tree across navigation: each click invalidates it.
+        started=time.monotonic()
+        if initial_tree is None:
+            self.mobile('activateApp',bundleId='com.burbn.instagram')
+            self.wait(1)
+        tree=initial_tree
         for _ in range(4):
-            state=self.observe(self.snapshot())
+            if tree is None:tree=self.snapshot()
+            state=self.observe(tree)
             if state.kind in ('input_unknown','sheet'):raise NavigationLost(state.reason)
+            if state.kind=='reels':
+                self.read_reel()
+                self.log('reels_returned',message='已确认返回短视频页',seconds=round(time.monotonic()-started,3))
+                return
+            names={e.get('name') for e in visible_nodes(tree)}
             if state.kind=='profile':
-                self.click(profile_back_name(self.last_tree));self.wait(.7)
-                continue
-            if self.find('reels-tab',optional=True):
-                break
-            if self.find('back-button',optional=True):
-                self.click('back-button')
-                self.wait(.7)
-            elif self.find('BackButton',optional=True):
-                self.click('BackButton')
-                self.wait(.7)
-            elif (back:=search_back_name(self.snapshot())):
-                self.click(back)
-                self.wait(.7)
-            elif self.find('Cancel',optional=True):
-                self.click('Cancel')
-                self.wait(.7)
+                target=profile_back_name(tree)
+            elif 'reels-tab' in names:
+                target='reels-tab'
             else:
-                raise NavigationLost('未找到 Instagram 主页面入口')
-        self.click('reels-tab')
-        self.wait(1)
-        self.read_reel()
+                target=next((name for name in ('back-button','BackButton') if name in names),None)
+                target=target or search_back_name(tree) or ('Cancel' if 'Cancel' in names else None)
+            if not target:raise NavigationLost('未找到 Instagram 主页面入口')
+            self.click(target)
+            tree=None
+            self.wait(.7)
+            if target=='reels-tab':
+                self.read_reel()
+                self.log('reels_returned',message='已确认返回短视频页',seconds=round(time.monotonic()-started,3))
+                return
+        raise NavigationLost('返回 Instagram 主页面的尝试已用完')
 
     def read_reel(self):
         for attempt in range(3):
@@ -784,6 +789,7 @@ class Runner:
         self.searches+=1
         self.log('search',message='已搜索：'+term,layout=search_layout(tree,term),attempt=self.search_attempts)
         seen=set()
+        return_started=None
         for index in range(int(self.cfg['search_videos_per_query'])):
             tree=self.search_results(term)
             nodes=[e for e in tree.iter() if e.get('visible')=='true']
@@ -808,20 +814,23 @@ class Runner:
             self.log('search_watch',message='观看搜索结果视频',query=term,author=post['author'],search_videos=self.search_videos)
             self.wait(self.rng.uniform(self.cfg['search_watch_min'],self.cfg['search_watch_max']))
             # Search browsing never sends social interactions. Return through the observed viewer control.
+            return_started=time.monotonic()
             current=self.read_reel()
             if 'back-button' not in {e.get('name') for e in current['nodes']}:
                 raise NavigationLost('搜索视频缺少可识别的返回入口')
             self.search_step='return_results'
             self.click('back-button');self.wait(1)
-            self.search_results(term)
+            tree=self.search_results(term)
             if index+1<int(self.cfg['search_videos_per_query']):
                 for _ in range(int(self.cfg['search_result_scrolls'])):
                     self.search_results(term)
                     self.gesture('up');self.wait(1)
-                    self.search_results(term)
+                    tree=self.search_results(term)
                     self.log('search_scroll',message='已滚动并重新确认搜索结果',query=term)
         self.search_step='return_reels'
-        self.reels()
+        self.reels(initial_tree=tree)
+        self.log('search_return_complete',message='搜索浏览结束，已恢复短视频浏览',
+                 seconds=round(time.monotonic()-return_started,3) if return_started is not None else None)
         self.search_step=None
 
     def search_results(self,term):
