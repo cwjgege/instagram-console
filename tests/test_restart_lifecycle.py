@@ -22,8 +22,8 @@ class RestartLifecycle(unittest.TestCase):
   self.assertNotIn('secret',str(p.log_ui.call_args))
  def test_ui_logging_failure_never_blocks_controls(self):
   p=self.panel()
-  with patch('panel.DATA') as data:
-   data.mkdir.side_effect=OSError('disk');Panel.log_ui(p,'test')
+  with patch('panel.Path.mkdir',side_effect=OSError('disk')):
+   Panel.log_ui(p,'test')
  def test_completion_does_not_enable_start_until_thread_exit(self):
   p=self.panel();p.events.put(dict(event='finished',status='complete',log_dir='test',generation=2));p.events.put(dict(event='worker_result',status='complete',generation=2))
   p.process_events();p.set_running.assert_not_called()
@@ -89,6 +89,16 @@ class SessionLifecycle(unittest.TestCase):
     with lock_device('A'*20), (self.base/'runner.lock').open('a') as f:
      fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);observed.append(True)
   self.r.notify=notify;self.r.run();self.assertEqual(observed,[True])
+ def test_managed_completion_cleans_only_own_cached_session(self):
+  self.r.managed=True;self.r.path='/session/old';self.r.connect=Mock();self.r.reels=Mock()
+  peer=self.base/'peer/active-session.json';peer.parent.mkdir();peer.write_text('{}')
+  with patch('runner.call') as transport:self.r.run()
+  self.assertEqual(transport.call_args.args,('DELETE','/session/old'))
+  self.assertFalse((self.base/'active-session.json').exists());self.assertTrue(peer.exists())
+ def test_managed_cleanup_failure_keeps_session_for_next_start_check(self):
+  self.r.managed=True;self.r.path='/session/old';self.r.connect=Mock();self.r.reels=Mock()
+  with patch('runner.call',side_effect=RuntimeError('offline')):self.r.run()
+  self.assertTrue((self.base/'active-session.json').exists())
  def test_save_failure_still_releases_device_lock(self):
   self.r.connect=Mock();self.r.reels=Mock()
   with patch('runner.atomic_json',side_effect=OSError('disk')):

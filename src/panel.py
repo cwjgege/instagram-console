@@ -11,15 +11,19 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import diagnostics
+import ui_theme as ui
 from pathlib import Path
 from runner import ROOT, Runner, atomic_json, AUTOMATION_DEFAULTS, validate_motion
 from ai_comments import DEFAULTS, PROVIDERS, english_text
 from app_paths import FROZEN,DATA,load_config
 
 class Panel:
-    def __init__(self, root):
+    def __init__(self, root, config=None, config_path=None):
         self.root=root
-        self.cfg={**AUTOMATION_DEFAULTS,**DEFAULTS,**load_config()}
+        self.cfg={**AUTOMATION_DEFAULTS,**DEFAULTS,**(config if config is not None else load_config())}
+        self.config_path=Path(config_path) if config_path else ROOT/'config.json'
+        self.pinned_device=config is not None
+        self.batch_mode=False
         self.device_window=None
         self.signature_notices=set()
         self.events=queue.Queue()
@@ -37,45 +41,48 @@ class Panel:
         self.closing=False
         self.comment_rules=json.loads(json.dumps(self.cfg['comment_rules']))
         self.selected_rule=None
-        root.title('Instagram 控制台')
-        root.geometry('900x800')
-        root.minsize(740,680)
-        root.option_add('*Font', ('PingFang SC',12))
-        style=ttk.Style()
-        style.configure('Title.TLabel',font=('PingFang SC',24,'bold'))
-        style.configure('Status.TLabel',font=('PingFang SC',16,'bold'))
-        style.configure('Action.TButton',font=('PingFang SC',14),padding=(18,10))
-        outer=ttk.Frame(root,padding=24); outer.pack(fill='both',expand=True)
-        ttk.Label(outer,text='Instagram 控制台',style='Title.TLabel').pack(anchor='w')
-        self.device_label=tk.StringVar(value=(self.cfg.get('device_name') or ('已选择 iPhone' if self.cfg.get('device_udid') else '尚未配置设备'))+' · USB 实机控制 · 手动运行')
-        ttk.Label(outer,textvariable=self.device_label).pack(anchor='w',pady=(4,8))
-        device_row=ttk.Frame(outer);device_row.pack(fill='x',pady=(0,12))
+        ui.apply(root);root.title('Instagram 控制台')
+        root.geometry(f'940x{min(820,root.winfo_screenheight()-100)}');root.minsize(820,580)
+        outer=ttk.Frame(root,padding=20);outer.pack(fill='both',expand=True)
+        ttk.Label(outer,text=self.cfg.get('device_name') or '设备控制台',style='Title.TLabel').pack(anchor='w')
+        self.device_label=tk.StringVar(value=('iOS '+self.cfg.get('device_ios','未知')+' · USB 实机控制 · 手动运行'))
+        ttk.Label(outer,textvariable=self.device_label,style='Muted.TLabel').pack(anchor='w',pady=(3,5))
+        device_row=ttk.Frame(outer);device_row.pack(fill='x',pady=(0,6))
         self.signature_status=tk.StringVar(value='签名状态待检查')
-        ttk.Label(device_row,textvariable=self.signature_status).pack(side='left')
+        ttk.Label(device_row,textvariable=self.signature_status,font=('PingFang SC',11)).pack(side='left')
         self.device_button=ttk.Button(device_row,text='设备配置 / 重新签名',command=self.open_devices)
         self.device_button.pack(side='right')
         state_frame=ttk.Frame(outer); state_frame.pack(fill='x')
         self.status=tk.StringVar(value='已停止，点击开始即可运行')
-        ttk.Label(state_frame,textvariable=self.status,style='Status.TLabel',wraplength=710).pack(anchor='w')
+        self.status_display=ttk.Label(state_frame,textvariable=self.status,style='Status.TLabel',wraplength=840)
+        self.status_display.pack(fill='x')
         self.feature_status=tk.StringVar(value='搜索状态：按本轮设置启用；异常时暂停搜索，确认页面后继续浏览')
-        ttk.Label(state_frame,textvariable=self.feature_status,wraplength=710).pack(anchor='w')
+        self.feature_display=ttk.Label(state_frame,textvariable=self.feature_status,wraplength=840,style='Muted.TLabel')
+        self.feature_display.pack(fill='x')
         self.stats=tk.StringVar(value='浏览 0   ·   翻页 0   ·   点赞 0   ·   收藏 0   ·   评论 0   ·   搜索 0')
-        ttk.Label(state_frame,textvariable=self.stats).pack(anchor='w',pady=(8,14))
-        actions=ttk.Frame(outer); actions.pack(fill='x',pady=(0,18))
-        self.start_button=ttk.Button(actions,text='开始浏览',style='Action.TButton',command=self.start)
+        ttk.Label(state_frame,textvariable=self.stats,font=('PingFang SC',11)).pack(anchor='w',pady=(6,10))
+        actions=ttk.Frame(outer); actions.pack(fill='x',pady=(0,12))
+        self.start_button=ttk.Button(actions,text='开始浏览',style='Primary.TButton',command=self.start)
         self.start_button.pack(side='left')
         self.stop_button=ttk.Button(actions,text='停止运行',style='Action.TButton',command=self.stop,state='disabled')
         self.stop_button.pack(side='left',padx=10)
         self.test_button=ttk.Button(actions,text='试运行 45 秒（仅浏览）',command=lambda:self.start(test=True))
         self.test_button.pack(side='left',padx=6)
-        self.tabs=ttk.Notebook(outer); self.tabs.pack(fill='both',expand=True)
-        settings=ttk.Frame(self.tabs,padding=16)
-        comments=ttk.Frame(self.tabs,padding=16)
+        footer=ttk.Frame(outer);footer.pack(side='bottom',fill='x',pady=(12,0))
+        self.edit_hint=tk.StringVar(value='仅此设备   ·   ⌘ Return 开始   ·   Esc 停止')
+        ttk.Label(footer,textvariable=self.edit_hint,style='Muted.TLabel',font=('PingFang SC',10)).pack(side='left')
+        self.global_save_button=ttk.Button(footer,text='保存全部设置',command=self.save_settings)
+        self.global_save_button.pack(side='right')
+        self.tabs=ttk.Notebook(outer);self.tabs.enable_traversal(); self.tabs.pack(fill='both',expand=True)
+        settings_page=ttk.Frame(self.tabs)
+        comments_page=ttk.Frame(self.tabs)
+        settings=ui.scroll_form(settings_page)
+        comments=ui.scroll_form(comments_page)
         logs=ttk.Frame(self.tabs,padding=12)
-        self.tabs.add(settings,text='浏览设置')
-        self.tabs.add(comments,text='英文评论规则')
-        self.tabs.add(logs,text='运行记录')
-        self.settings_widgets=[]
+        self.tabs.add(settings_page,text='浏览设置')
+        self.tabs.add(comments_page,text='评论规则')
+        self.tabs.add(logs,text='运行日志')
+        self.settings_widgets=[self.global_save_button]
         self.minutes=tk.StringVar(value=str(self.cfg['minutes']))
         row=ttk.Frame(settings); row.pack(fill='x',pady=(0,16))
         ttk.Label(row,text='本次时长上限（分钟）').pack(side='left')
@@ -96,9 +103,18 @@ class Panel:
         for key,label in [('enable_search','搜索'),('enable_likes','点赞'),('enable_saves','收藏'),('enable_comments','英文评论')]:
             self.flags[key]=tk.BooleanVar(value=self.cfg[key])
             w=ttk.Checkbutton(flags,text=label,variable=self.flags[key]); w.pack(side='left',padx=(0,18)); self.settings_widgets.append(w)
+        cadence=ttk.Frame(settings);cadence.pack(fill='x',pady=(0,8))
+        ttk.Label(cadence,text='点赞间隔：每浏览').pack(side='left')
+        self.like_interval_min=tk.StringVar(value=str(self.cfg['like_interval_min']))
+        self.like_interval_max=tk.StringVar(value=str(self.cfg['like_interval_max']))
+        for label,var in [('',self.like_interval_min),('～',self.like_interval_max)]:
+            if label:ttk.Label(cadence,text=label).pack(side='left')
+            w=ttk.Spinbox(cadence,from_=1,to=100,textvariable=var,width=4);w.pack(side='left',padx=6);self.settings_widgets.append(w)
+        ttk.Label(cadence,text='条视频，随机安排一次').pack(side='left')
+        ttk.Label(settings,text='到达间隔后，遇到内容匹配且未点过赞的视频才点赞；回看同一视频不重复计数。每日上限单独生效。',style='Muted.TLabel',wraplength=680).pack(anchor='w',pady=(0,12))
         limits=ttk.Frame(settings); limits.pack(fill='x')
         self.limits={}
-        for key,label in [('likes','点赞 / 天'),('saves','收藏 / 天'),('comments','评论 / 天')]:
+        for key,label in [('likes','每日点赞上限'),('saves','每日收藏上限'),('comments','每日评论上限')]:
             ttk.Label(limits,text=label).pack(side='left')
             var=tk.StringVar(value=str(self.cfg['max_'+key+'_per_day'])); self.limits[key]=var
             w=ttk.Spinbox(limits,from_=0,to=50,textvariable=var,width=4); w.pack(side='left',padx=(6,16)); self.settings_widgets.append(w)
@@ -112,7 +128,7 @@ class Panel:
             ttk.Label(recovery,text=label).pack(side='left')
             w=ttk.Spinbox(recovery,from_=1,to=high,textvariable=var,width=3);w.pack(side='left',padx=(5,12));self.settings_widgets.append(w)
         ttk.Label(settings,text='观看时间会变化，偶尔回看或连续翻页。点赞、收藏按说明匹配。\nAI 评论会另结合采样画面；断连或无法确认操作结果时停止。',wraplength=690).pack(anchor='w',pady=(20,0))
-        ttk.Label(comments,text='本页仅用于“固定规则”模式；AI 模式请到“AI 内容与评论”配置。',wraplength=680).pack(anchor='w')
+        ttk.Label(comments,text='用于“固定规则”模式；AI 生成请在“AI 评论”中配置。',wraplength=680).pack(anchor='w')
         ttk.Label(comments,text='依据视频说明匹配，不解析视频画面。每条评论每天最多使用一次。',wraplength=680).pack(anchor='w',pady=(4,10))
         self.rule_list=tk.Listbox(comments,height=3,exportselection=False)
         self.rule_list.pack(fill='x',pady=(0,10))
@@ -132,9 +148,13 @@ class Panel:
         self.save_button=ttk.Button(comments,text='保存规则和设置',command=self.save_settings)
         self.save_button.pack(anchor='e',pady=(7,0)); self.settings_widgets.append(self.save_button)
         self.refresh_rules(0)
-        self.log_text=tk.Text(logs,height=15,wrap='word',font=('PingFang SC',11),state='disabled')
+        log_body=ttk.Frame(logs)
+        self.log_text=tk.Text(log_body,height=15,wrap='word',font=('PingFang SC',11),state='disabled')
         log_footer=ttk.Frame(logs);log_footer.pack(side='bottom',fill='x',pady=(8,0))
-        self.log_text.pack(fill='both',expand=True)
+        log_body.pack(fill='both',expand=True)
+        log_scroll=ttk.Scrollbar(log_body,orient='vertical',command=self.log_text.yview)
+        log_scroll.pack(side='right',fill='y');self.log_text.configure(yscrollcommand=log_scroll.set)
+        self.log_text.pack(side='left',fill='both',expand=True)
         export_row=ttk.Frame(log_footer);export_row.pack(fill='x')
         self.include_diagnostic_images=tk.BooleanVar(value=False)
         ttk.Checkbutton(export_row,text='导出时包含已记录截图（可能含账号及内容）',variable=self.include_diagnostic_images).pack(side='left')
@@ -143,20 +163,34 @@ class Panel:
         self.build_ai_settings()
         self.build_motion_settings()
         self.build_search_settings()
-        ttk.Label(outer,text='按 Esc 也可停止。运行时请保持手机连接且可用；不创建定时任务。').pack(anchor='w',pady=(14,0))
+
         root.protocol('WM_DELETE_WINDOW',self.close)
-        root.createcommand('tk::mac::Quit',self.close)
+        root.tk.createcommand('tk::mac::Quit',self.close)
+        root.bind('<Configure>',lambda e:self.resize_header(e),add='+')
         root.bind('<Escape>',lambda _:self.stop() if self.worker and self.worker.is_alive() else None)
         root.bind('<Command-Return>',lambda _:self.start())
-        root.bind_all('<ButtonPress-1>',self.trace_pointer,add='+')
-        root.bind_all('<ButtonRelease-1>',self.trace_pointer,add='+')
+        root.bind('<Command-s>',lambda _:self.global_save_button.invoke())
+        root.bind('<Control-Tab>',lambda _:self.cycle_tab(1))
+        root.bind('<Control-Shift-Tab>',lambda _:self.cycle_tab(-1))
+        root.bind('<ButtonPress-1>',self.trace_pointer,add='+')
+        root.bind('<ButtonRelease-1>',self.trace_pointer,add='+')
         root.after(200,self.poll)
         root.after(400,self.signature_tick)
         if FROZEN and not self.cfg.get('device_udid'):root.after(650,self.open_devices)
 
+    def cycle_tab(self,direction):
+        self.tabs.select((self.tabs.index(self.tabs.select())+direction)%len(self.tabs.tabs()))
+        self.tabs.focus_set()
+        return 'break'
+
+    def resize_header(self,event):
+        if event.widget==self.root:
+            width=max(600,event.width-48)
+            self.status_display.configure(wraplength=width);self.feature_display.configure(wraplength=width)
+
     def build_search_settings(self):
         page=ttk.Frame(self.tabs,padding=12)
-        self.tabs.add(page,text='搜索浏览')
+        self.tabs.add(page,text='搜索设置')
         footer=ttk.Frame(page);footer.pack(side='bottom',fill='x',pady=(8,0))
         area=ttk.Frame(page);area.pack(fill='both',expand=True)
         canvas=tk.Canvas(area,highlightthickness=0,borderwidth=0)
@@ -171,15 +205,7 @@ class Panel:
             for child in frame.winfo_children():
                 if isinstance(child,ttk.Label):child.configure(wraplength=max(220,event.width-16))
         canvas.bind('<Configure>',resize)
-        def scroll(event):
-            widget=event.widget
-            if widget.winfo_class() in ('TCombobox','TSpinbox'):return
-            while widget is not None:
-                if widget==page:
-                    if canvas.yview()!=(0.0,1.0) and event.delta:canvas.yview_scroll(-1 if event.delta>0 else 1,'units')
-                    return
-                widget=getattr(widget,'master',None)
-        self.root.bind('<MouseWheel>',scroll,add='+')
+        ui.bind_form_scroll(self.root,canvas,frame)
         ttk.Label(frame,text='搜索后打开可识别的视频，观看后返回结果，再滚动查找下一条。',wraplength=680).pack(anchor='w',pady=(0,16))
         self.search_numbers={}
         for key,label,low,high in [('search_videos_per_query','每次搜索观看视频数',1,5),
@@ -203,8 +229,8 @@ class Panel:
 
     def log_ui(self,event,**details):
         try:
-            DATA.mkdir(parents=True,exist_ok=True)
-            with (DATA/'ui-events.jsonl').open('a') as output:
+            folder=Path(self.__dict__.get('cfg',{}).get('runtime_dir',DATA));folder.mkdir(parents=True,exist_ok=True)
+            with (folder/'ui-events.jsonl').open('a') as output:
                 output.write(json.dumps({'time':datetime.now().astimezone().isoformat(timespec='milliseconds'),
                     'event':event,**details},ensure_ascii=False)+'\n')
         except OSError:pass
@@ -226,9 +252,9 @@ class Panel:
 
     def update_signature(self):
         import device_manager as dm
-        record=dm.signing_record(self.cfg.get('device_udid','')) if FROZEN else None
+        record=dm.signing_record(self.cfg.get('device_udid','')) if FROZEN or self.cfg.get('managed_device') else None
         state,remaining=dm.expiry_state(record,self.cfg.get('signature_warn_hours',48))
-        if not FROZEN:
+        if not FROZEN and not self.cfg.get('managed_device'):
             self.signature_status.set('开发目录模式；完整安装包提供设备与签名管理');return
         if state=='unknown':self.signature_status.set('请先完成设备配置，读取真实签名有效期');return
         date=__import__('datetime').datetime.fromisoformat(record['expires_at']).astimezone().strftime('%Y-%m-%d %H:%M')
@@ -243,8 +269,9 @@ class Panel:
         if not self.closing:self.update_signature();self.root.after(60000,self.signature_tick)
 
     def build_motion_settings(self):
-        frame=ttk.Frame(self.tabs,padding=16)
-        self.tabs.add(frame,text='手势与连接')
+        page=ttk.Frame(self.tabs)
+        self.tabs.add(page,text='手势连接')
+        frame=ui.scroll_form(page)
         w=ttk.Button(frame,text='保存设置',command=self.save_settings)
         w.pack(side='bottom',anchor='e',pady=(8,0));self.settings_widgets.append(w)
         ttk.Label(frame,text='在视频中央竖向滑动，避开底部导航与右侧按钮。',wraplength=670).pack(anchor='w')
@@ -282,10 +309,11 @@ class Panel:
         ttk.Label(frame,text='只重试页面读取，不重发点赞、收藏或评论。互动结果不明时停止。\n重连可能需要一些时间；手机应保持连接、解锁。',wraplength=670).pack(anchor='w',pady=(2,8))
 
     def build_ai_settings(self):
-        frame=ttk.Frame(self.tabs,padding=14)
-        self.tabs.insert(1,frame,text='AI 内容与评论')
+        page=ttk.Frame(self.tabs)
+        self.tabs.insert(1,page,text='AI 评论')
+        frame=ui.scroll_form(page)
         result_frame=ttk.Frame(self.tabs,padding=14)
-        self.tabs.insert(2,result_frame,text='AI 分析结果')
+        self.tabs.insert(2,result_frame,text='分析结果')
         self.provider_hint=tk.StringVar()
         ttk.Label(frame,textvariable=self.provider_hint,wraplength=690).pack(anchor='w')
         row=ttk.Frame(frame);row.pack(fill='x',pady=(9,6))
@@ -335,8 +363,11 @@ class Panel:
         self.preview_button.pack(side='left');self.settings_widgets.append(self.preview_button)
         w=ttk.Button(actions,text='保存 AI 设置',command=self.save_settings);w.pack(side='right');self.settings_widgets.append(w)
         ttk.Label(result_frame,text='显示最近一次模型判断。预览不会发评论，也计入模型调用上限。',wraplength=690).pack(anchor='w',pady=(0,8))
-        self.ai_result=tk.Text(result_frame,height=15,wrap='word',font=('PingFang SC',12),state='disabled')
-        self.ai_result.pack(fill='both',expand=True)
+        result_body=ttk.Frame(result_frame);result_body.pack(fill='both',expand=True)
+        self.ai_result=tk.Text(result_body,height=15,wrap='word',font=('PingFang SC',12),state='disabled')
+        result_scroll=ttk.Scrollbar(result_body,orient='vertical',command=self.ai_result.yview)
+        result_scroll.pack(side='right',fill='y');self.ai_result.configure(yscrollcommand=result_scroll.set)
+        self.ai_result.pack(side='left',fill='both',expand=True)
         self.ai_result_tab=result_frame
 
     def provider_changed(self,*_):
@@ -376,6 +407,8 @@ class Panel:
     def select_rule(self,_=None):
         selected=self.rule_list.curselection()
         if selected:
+            cfg['like_interval_min']=int(self.like_interval_min.get())
+            cfg['like_interval_max']=int(self.like_interval_max.get())
             self.store_current_rule()
             self.load_rule(selected[0])
 
@@ -454,15 +487,18 @@ class Panel:
                 and 5<=cfg['search_watch_min']<=cfg['search_watch_max']<=90):
                 raise ValueError('搜索视频数须为 1～5，滚动次数为 1～3，观看时长为 5～90 秒且从小到大')
             validate_motion(cfg)
-            atomic_json(ROOT/'config.json',cfg)
+            atomic_json(self.__dict__.get('config_path',ROOT/'config.json'),cfg)
             self.cfg=cfg
             if not quiet: self.status.set('设置已保存')
             return True
         except (ValueError,TypeError,OSError) as exc:
-            messagebox.showerror('请检查配置',str(exc),parent=self.root)
+            if self.__dict__.get('batch_mode'):self.status.set('配置有误：'+str(exc))
+            else:messagebox.showerror('请检查配置',str(exc),parent=self.root)
             return False
 
     def set_running(self,running):
+        hint=self.__dict__.get('edit_hint')
+        if hint:hint.set('运行中，停止后可编辑设置   ·   Esc 停止' if running else '仅此设备   ·   ⌘ Return 开始   ·   Esc 停止')
         self.start_button.configure(state='disabled' if running else 'normal',text='开始浏览')
         self.test_button.configure(state='disabled' if running else 'normal')
         self.stop_button.configure(state='normal' if running else 'disabled')
@@ -489,11 +525,13 @@ class Panel:
             self.status.set('已安排重新启动，正在确认上次任务已退出…');return
         if self.device_window and self.device_window.busy:
             self.status.set('设备配置正在进行，请等待完成。');return
-        if FROZEN:
+        if FROZEN or self.cfg.get('managed_device'):
             import device_manager as dm
             record=dm.signing_record(self.cfg.get('device_udid',''))
             if dm.expiry_state(record)[0] in ('unknown','expired'):
-                self.status.set('请先完成设备配置或重新签名。');self.open_devices();return
+                self.status.set('请先完成设备配置或重新签名。')
+                if not self.__dict__.get('batch_mode'):self.open_devices()
+                return
         if not self.save_settings(quiet=True): return
         if preview and not (self.model_key.get().strip() or os.environ.get(PROVIDERS[self.cfg['ai_provider']]['env'])):
             self.status.set('请填写 '+PROVIDERS[self.cfg['ai_provider']]['label']+' API Key；密钥不会保存到配置')

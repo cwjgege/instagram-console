@@ -16,6 +16,8 @@ def self_test(output):
     env=dm.child_env(vendor)
     node=subprocess.check_output([str(vendor/'bin/node'),'--version'],env=env,text=True).strip()
     appium=subprocess.check_output([str(vendor/'bin/node'),str(vendor/'node_modules/appium/index.js'),'--version'],env=env,text=True).strip()
+    assert (vendor/'legacy-wda/WebDriverAgent.xcodeproj').exists(), 'Missing iOS16 sources'
+    assert (dm.ASSETS/'resources/ios_device.cjs').exists(), 'Missing USB bridge'
     result={'version':APP_VERSION,'python':sys.version.split()[0],'tk':tkinter.TkVersion,
             'pillow':PIL.Image.__version__,'tls_ca_certificates':ssl.create_default_context().cert_store_stats()['x509_ca'],'node':node,'appium':appium,
             'data_directory':str(DATA),'xcode':str(dm.xcode_directory()),'standalone':bool(getattr(sys,'frozen',False))}
@@ -40,14 +42,16 @@ def main():
         root.destroy();return
     try:
         load_config()
-        from panel import Panel
-        Panel(root);root.mainloop()
+        from fleet import Fleet
+        Fleet(root);root.mainloop()
     except Exception:
         import traceback
         traceback.print_exc()
         messagebox.showerror('启动失败','请查看应用数据目录中的 console.log。\n'+str(DATA),parent=root)
     finally:
         import device_manager
+        import runtime_manager
+        runtime_manager.stop_all()
         device_manager.stop_owned_server()
         lock.close()
 

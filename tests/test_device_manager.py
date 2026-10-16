@@ -23,7 +23,7 @@ class DeviceSetup(unittest.TestCase):
   self.assertNotIn('password',json.dumps(c).lower());self.assertTrue(c['appium:noReset'])
  def test_provision_build_request_never_requests_phone_app_uninstall(self):
   record={'expires_at':(datetime.now(timezone.utc)+timedelta(days=7)).isoformat()}
-  with patch.object(dm,'scan_devices',return_value=[self.device]),patch.object(dm,'check_xcode'),patch.object(dm,'ensure_server'),patch.object(dm,'close_other_sessions'),patch.object(dm,'profile_record',return_value=record),patch('runner.call',return_value={'sessionId':'new'}) as call:
+  with patch.object(dm,'scan_devices',return_value=[self.device]),patch.object(dm,'check_xcode'),patch('runtime_manager.ensure_server',return_value={'url':'http://127.0.0.1:19000/igconsole'}),patch.object(dm,'close_other_sessions'),patch.object(dm,'profile_record',return_value=record),patch('runner.call',return_value={'sessionId':'new'}) as call:
    dm.provision(self.device,'ABCDE12345')
   caps=call.call_args.args[2]['capabilities']['alwaysMatch']
   self.assertFalse(caps['appium:useNewWDA']);self.assertFalse(caps['appium:usePrebuiltWDA'])
@@ -75,18 +75,15 @@ class DeviceSetup(unittest.TestCase):
   with patch('panel.FROZEN',True),patch.object(dm,'signing_record',return_value=record),patch('panel.messagebox.showwarning') as warning:
    panel.update_signature();panel.update_signature()
    warning.assert_called_once();self.assertIn('即将到期',panel.signature_status.set.call_args.args[0])
- def test_switching_device_releases_only_other_owned_sessions(self):
-  dm.write_json(self.data/'devices/one/active-session.json',{'sessionId':'keep'})
+ def test_starting_one_device_preserves_other_sessions(self):
   old=self.data/'devices/two/active-session.json';dm.write_json(old,{'sessionId':'old'})
-  with patch.object(dm,'FROZEN',True),patch('runner.call') as call:
-   dm.close_other_sessions('keep')
-   self.assertEqual(call.call_count,1)
-   self.assertEqual(call.call_args.args,('DELETE','/session/old'))
-   self.assertFalse(old.exists())
- def test_missing_server_session_is_removed_locally(self):
+  with patch('runner.call') as call:
+   self.assertEqual(dm.close_other_sessions('keep'),0)
+   call.assert_not_called();self.assertTrue(old.exists())
+ def test_stale_peer_session_is_not_touched(self):
   old=self.data/'devices/one/active-session.json';dm.write_json(old,{'sessionId':'old'})
-  with patch.object(dm,'FROZEN',True),patch('runner.call',side_effect=RuntimeError('invalid session id')):
-   dm.close_other_sessions();self.assertFalse(old.exists())
+  with patch('runner.call') as call:
+   dm.close_other_sessions();call.assert_not_called();self.assertTrue(old.exists())
  def test_shutdown_never_kills_an_unrelated_process(self):
   with patch.object(dm,'SERVER_PROCESS',None),patch.object(dm,'SERVER_PID',1234),patch.object(dm.subprocess,'run',return_value=Mock(stdout='/unrelated/program')),patch.object(dm.os,'killpg') as kill:
    dm.stop_owned_server();kill.assert_not_called()

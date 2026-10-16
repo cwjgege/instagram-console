@@ -16,6 +16,12 @@ def main():
     if (VENDOR/'node_modules').exists():shutil.rmtree(VENDOR/'node_modules')
     shutil.copytree(ROOT/'node_modules',VENDOR/'node_modules',symlinks=True)
     shutil.copy2(ROOT/'tools/driver-template.json',VENDOR/'driver-template.json')
+    legacy=BUILD/'legacy-package';legacy.mkdir(parents=True,exist_ok=True)
+    packed=subprocess.check_output([npm,'pack','appium-webdriveragent@12.2.2','--pack-destination',str(legacy),'--json'],text=True,cwd=ROOT)
+    package=legacy/json.loads(packed)[0]['filename']
+    with tarfile.open(package) as bundle:bundle.extractall(legacy,filter='data')
+    if (VENDOR/'legacy-wda').exists():shutil.rmtree(VENDOR/'legacy-wda')
+    shutil.copytree(legacy/'package',VENDOR/'legacy-wda')
     archive=STAGE/'vendor.tar.gz'
     with tarfile.open(archive,'w:gz',compresslevel=6) as bundle:
         for child in VENDOR.iterdir():bundle.add(child,arcname=child.name)
@@ -26,9 +32,9 @@ def main():
          '--distpath',ROOT/'dist','--workpath',BUILD/'pyinstaller','--specpath',BUILD,
          '--paths',SOURCE,'--collect-all','PIL','--collect-all','certifi',
          '--add-data',f'{STAGE / "default-config.json"}:.','--add-data',f'{archive}:.',
-         '--add-data',f'{license_source}:licenses',SOURCE/'app_entry.py'],cwd=ROOT)
+         '--add-data',f'{license_source}:licenses','--add-data',f'{SOURCE / "resources"}:resources',SOURCE/'app_entry.py'],cwd=ROOT)
     app=ROOT/'dist/Instagram 控制台.app';info=app/'Contents/Info.plist'
-    values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString='1.1.8',CFBundleVersion='118',NSHighResolutionCapable=True)
+    values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString='1.2.3',CFBundleVersion='123',NSHighResolutionCapable=True)
     info.write_bytes(plistlib.dumps(values));run(['/usr/bin/codesign','--force','--deep','--sign','-',app])
     print(app)
 if __name__=='__main__':main()

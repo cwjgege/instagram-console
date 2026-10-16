@@ -24,13 +24,15 @@ from page_state import (PageBlocked, classify, visible_nodes, screen_height, sea
 from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
-AUTOMATION_DEFAULTS = dict(recovery_enabled=True,recovery_attempts=3,recovery_run_limit=5,
+AUTOMATION_DEFAULTS = dict(like_interval_min=3,like_interval_max=8,recovery_enabled=True,recovery_attempts=3,recovery_run_limit=5,
     gesture_left=30,gesture_right=58,gesture_top=28,gesture_bottom=66,
     gesture_distance_min=22,gesture_distance_max=32,gesture_duration_min=220,gesture_duration_max=480,
     reconnect_enabled=True,reconnect_limit=2,close_business_chat=True,usb_wait_seconds=60,
     search_videos_per_query=2,search_result_scrolls=1,search_watch_min=10,search_watch_max=20,diagnostic_screenshots=False)
 
 def validate_motion(cfg):
+    if not 1<=cfg.get('like_interval_min',3)<=cfg.get('like_interval_max',8)<=100:
+        raise ValueError('点赞间隔须为 1～100 条视频，且最小值不能大于最大值')
     for low,high,minimum,maximum in [('gesture_left','gesture_right',20,65),
         ('gesture_top','gesture_bottom',22,70),('gesture_distance_min','gesture_distance_max',15,40),
         ('gesture_duration_min','gesture_duration_max',180,800)]:
@@ -66,8 +68,8 @@ def atomic_json(path, value):
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
     tmp.replace(path)
 
-def call(method, path, data=None, timeout=35):
-    req = Request(SERVER + path, None if data is None else json.dumps(data).encode(),
+def call(method, path, data=None, timeout=35, server=None):
+    req = Request((server or SERVER) + path, None if data is None else json.dumps(data).encode(),
                   {'Content-Type': 'application/json'}, method=method)
     try:
         with urlopen(req, timeout=timeout) as r:
@@ -96,6 +98,8 @@ class Runner:
         config = self.cfg
         self.model_api_key=ai_comments.api_key(model_api_key,config['ai_provider'])
         self.analysis_only=analysis_only
+        self.managed=FROZEN or bool(config.get('managed_device'))
+        self.server_url=config.get('server_url')
         self.ai_cache={}
         self.ai_missing_warned=False
         self.stop = stop or threading.Event()
@@ -104,6 +108,7 @@ class Runner:
         self.browse_only = browse_only
         self.runtime = Path(config['runtime_dir'])
         self.rng = random.SystemRandom()
+        self.like_seen=set();self.like_next=self.rng.randint(config['like_interval_min'],config['like_interval_max'])
         self.path = None
         self.deadline = None
         self.swipes = self.searches = self.back_depth = self.position = 0
@@ -134,6 +139,11 @@ class Runner:
         self.search_failures = 0
         self.search_step = None
 
+    def http(self,method,path,data=None,timeout=35):
+        url=getattr(self,'server_url',None)
+        if url:return call(method,path,data,timeout,server=url)
+        return call(method,path,timeout=timeout) if data is None else call(method,path,data,timeout=timeout)
+
     def log(self, event, **details):
         row = {'time':datetime.now().isoformat(timespec='seconds'),'event':event,**details}
         with (self.log_dir / 'events.jsonl').open('a') as f:
@@ -157,7 +167,7 @@ class Runner:
         readonly=method=='GET' or suffix=='/elements' or (
             suffix=='/execute/sync' and (data or {}).get('script')=='mobile: activeAppInfo')
         try:
-            return call(method, self.path + suffix, data)
+            return self.http(method, self.path + suffix, data)
         except Exception as exc:
             if suffix=='/actions' and transport_error(exc):
                 raise TransportLost('滑动时控制连接中断，放弃该动作并重新识别') from exc
@@ -165,7 +175,7 @@ class Runner:
             # Only reads can be retried. Never replay a click, input, or gesture.
             self.log('read_retry',message='页面读取连接异常，短暂等待后重试')
             self.wait(.8)
-            try:return call(method,self.path+suffix,data)
+            try:return self.http(method,self.path+suffix,data)
             except Exception as retry:
                 if transport_error(retry):raise TransportLost('手机控制连接中断') from retry
                 raise
@@ -220,7 +230,7 @@ class Runner:
         try:
             screenshot=None
             if self.cfg.get('diagnostic_screenshots') and self.path and not self.stop.is_set():
-                try:screenshot=call('GET',self.path+'/screenshot',timeout=5)
+                try:screenshot=self.http('GET',self.path+'/screenshot',timeout=5)
                 except Exception:pass
             folder=diagnostics.record(self.log_dir,stage+(':'+self.search_step if stage=='search' and self.search_step else ''),exc,self.last_tree,self.page_state,
                 self.feature_state,self.counts,screenshot)
@@ -247,14 +257,18 @@ class Runner:
     def connect(self, force_new=False):
         self.log('connecting', message='正在连接指定 iPhone')
         self.wait_for_usb()
-        if FROZEN:
-            from device_manager import ensure_server,child_env,prepare_vendor
-            ensure_server(lambda message:self.log('connecting',message=message))
+        if self.managed:
+            from device_manager import child_env,prepare_vendor,signing_record
+            from runtime_manager import ensure_server,ensure_legacy
+            notify=lambda message:self.log('connecting',message=message)
+            self.server_url=ensure_server(self.cfg['device_udid'],notify,self.stop)['url']
             self.device_env=child_env(prepare_vendor())
+            record=signing_record(self.cfg['device_udid'])
+            if record and record.get('controller')=='legacy16':ensure_legacy(self.cfg['device_udid'],record,notify,self.stop)
         try:
-            call('GET','/status',timeout=3)
+            self.http('GET','/status',timeout=3)
         except Exception:
-            if FROZEN:raise RuntimeError('内置控制服务未能连接，请打开设备配置检查。')
+            if self.managed:raise RuntimeError('内置控制服务未能连接，请打开设备配置检查。')
             env = os.environ.copy()
             env['PATH'] = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:' + env.get('PATH','')
             self.server_log = (self.runtime / 'server-console.log').open('a')
@@ -263,7 +277,7 @@ class Runner:
             for _ in range(30):
                 self.wait(1)
                 try:
-                    call('GET','/status',timeout=2)
+                    self.http('GET','/status',timeout=2)
                     break
                 except Exception:
                     continue
@@ -273,11 +287,11 @@ class Runner:
         if state.exists() and not force_new:
             old = json.loads(state.read_text())
             caps = old.get('capabilities',{})
-            if caps.get('udid',caps.get('appium:udid')) == self.cfg['device_udid']:
+            if caps.get('udid',caps.get('appium:udid')) == self.cfg['device_udid'] and (not self.managed or old.get('server_url')==self.server_url):
                 try:
                     self.path = '/session/' + old['sessionId']
                     self.log('connecting',message='正在检查上次的手机控制连接…')
-                    info=call('POST',self.path+'/execute/sync',{'script':'mobile: activeAppInfo','args':[{}]},timeout=15)
+                    info=self.http('POST',self.path+'/execute/sync',{'script':'mobile: activeAppInfo','args':[{}]},timeout=15)
                     if not isinstance(info,dict) or not info.get('bundleId'):
                         raise RuntimeError('旧连接未返回当前应用信息')
                     self.check()
@@ -287,7 +301,7 @@ class Runner:
                     raise
                 except Exception:
                     self.log('session_stale',message='上次连接已失效，清理后重新建立连接')
-                    try:call('DELETE',self.path,timeout=8)
+                    try:self.http('DELETE',self.path,timeout=8)
                     except Exception:pass
                     state.unlink(missing_ok=True)
                     self.path = None
@@ -299,16 +313,19 @@ class Runner:
         payload['capabilities']['alwaysMatch']['appium:useNewWDA']=False
         if force_new:
             if self.path:
-                try:call('DELETE',self.path,timeout=8)
+                try:self.http('DELETE',self.path,timeout=8)
                 except Exception:pass
             self.check()
         if payload['capabilities']['alwaysMatch']['appium:udid'] != self.cfg['device_udid']:
             raise RuntimeError('设备标识不一致，已停止')
-        if FROZEN:
-            from device_manager import close_other_sessions
-            close_other_sessions()
+        if self.managed:
+            from runtime_manager import endpoints
+            ports=endpoints(self.cfg['device_udid']);caps=payload['capabilities']['alwaysMatch']
+            caps.update({'appium:wdaLocalPort':ports['wda'],'appium:mjpegServerPort':ports['mjpeg'],'appium:wdaRemotePort':8100})
+            if record and record.get('controller')=='legacy16':caps['appium:webDriverAgentUrl']=f"http://127.0.0.1:{ports['wda']}"
         self.log('connecting',message='正在建立手机控制会话，停止时需等待当前连接命令结束…')
-        value = call('POST','/session',payload,timeout=240)
+        value = self.http('POST','/session',payload,timeout=240)
+        if self.managed:value['server_url']=self.server_url
         atomic_json(state,value)
         self.path = '/session/' + value['sessionId']
         self.check()
@@ -493,6 +510,20 @@ class Runner:
         self.refresh_required=False
         self.log('recovered',message='已恢复 Reels，重新识别当前视频',recoveries=self.recoveries)
         return post
+
+    def consider_like(self,post,related):
+        if self.browse_only or not self.cfg['enable_likes'] or not post['key']:return
+        if post['key'] in self.like_seen:return
+        self.like_seen.add(post['key'])
+        if len(self.like_seen)<self.like_next or not related:return
+        if self.daily['likes']>=self.cfg['max_likes_per_day']:return
+        if self.daily['posts'].get(post['key'],{}).get('likes'):return
+        self.in_interaction=True
+        try:self.toggle_on(post,'likes','like-button',{'like','like post'})
+        finally:self.in_interaction=False
+        # Advance even when the visible button was already active or unavailable.
+        # An uncertain write raises above and is never retried here.
+        self.like_next=len(self.like_seen)+self.rng.randint(self.cfg['like_interval_min'],self.cfg['like_interval_max'])
 
     def related(self, post):
         caption = post['caption'].casefold()
@@ -934,10 +965,9 @@ class Runner:
                     if self.rng.random()<.12:
                         dwell+=self.rng.uniform(10,25)
                     self.wait(dwell)
+                    self.consider_like(post,related)
                     if related and not self.browse_only:
                         self.in_interaction=True
-                        if self.cfg['enable_likes'] and self.rng.random()<self.cfg['like_probability']:
-                            self.toggle_on(post,'likes','like-button',{'like','like post'})
                         if self.cfg['enable_saves'] and self.rng.random()<self.cfg['save_probability']:
                             self.toggle_on(post,'saves','save-button',{'save','save post'})
                         if self.cfg['enable_comments'] and self.cfg['comments_mode']!='ai' and self.rng.random()<self.cfg['comment_probability']:
@@ -990,6 +1020,11 @@ class Runner:
             message='手机控制连接中断，当前动作结果未确认，已停止且不会重发' if transport_error(e) else str(e)
             self.log('error',message=message,detail=str(e)[:1800])
         finally:
+            if self.managed and self.path:
+                try:
+                    self.http('DELETE',self.path,timeout=8)
+                    (self.runtime/'active-session.json').unlink(missing_ok=True)
+                except Exception:self.log('session_cleanup_pending',message='此设备连接清理未完成，下一次启动会重新检查。')
             summary={'status':status,'counts':self.counts,'swipes':self.swipes,'searches':self.searches,
                      'log_dir':str(self.log_dir),'run_id':self.run_id,'recoveries':self.recoveries,
                      'reconnections':self.reconnections,'search_videos':self.search_videos,'search_attempts':self.search_attempts,

@@ -54,6 +54,10 @@ def check_xcode():
     return directory
 
 def prepare_vendor(notify=lambda message:None):
+    if not FROZEN and os.environ.get('IG_CONSOLE_VENDOR'):
+        source=Path(os.environ['IG_CONSOLE_VENDOR']).resolve()
+        if not (source/'bin/node').exists() or not (source/'node_modules/appium/index.js').exists():raise RuntimeError('开发运行环境路径无效')
+        return source
     target=DATA/'runtime'/VERSION
     def ready():return (target/'.ready').exists() and (target/'bin/node').exists() and (target/'node_modules/appium/index.js').exists()
     if ready():return target
@@ -152,7 +156,39 @@ def wired_iphones(result):
             'developer':props.get('developerModeStatus')=='enabled'})
     return devices
 
-def scan_devices():return wired_iphones(coredevice(['list','devices']))
+def usb_serials():
+    tree=plistlib.loads(subprocess.check_output(['/usr/sbin/ioreg','-p','IOUSB','-l','-a'],timeout=8));found=set()
+    def walk(n):
+        if isinstance(n,dict):
+            if n.get('USB Product Name')=='iPhone':found.add(str(n.get('USB Serial Number','')).replace('-','').lower())
+            for c in n.get('IORegistryEntryChildren',[]):walk(c)
+        elif isinstance(n,list):
+            for c in n:walk(c)
+    walk(tree);return found
+
+def scan_devices():
+    physical=usb_serials()
+    try:modern=wired_iphones(coredevice(['list','devices']))
+    except RuntimeError:modern=[]
+    modern=[d for d in modern if d['udid'].replace('-','').lower() in physical]
+    try:
+        r=subprocess.run(['/usr/bin/xcrun','xcdevice','list','--timeout','5'],env=child_env(),capture_output=True,text=True,timeout=15)
+        rows=json.loads(r.stdout) if r.returncode==0 else []
+    except (ValueError,subprocess.TimeoutExpired):rows=[]
+    known={d['udid'].lower() for d in modern}
+    old=[d for d in rows if not d.get('simulator') and str(d.get('identifier','')).replace('-','').lower() in physical and d.get('identifier','').lower() not in known]
+    represented={d.get('udid',d['identifier']).replace('-','').lower() for d in modern+old}
+    old.extend({'identifier':serial,'name':'iPhone','modelName':'iPhone'} for serial in physical-represented)
+    if old:
+        from runtime_manager import probe_legacy
+        try:values={d['udid'].lower():d for d in probe_legacy([d['identifier'] for d in old])}
+        except (RuntimeError,subprocess.TimeoutExpired):values={}
+        for d in old:
+            info=values.get(d['identifier'].lower(),{})
+            modern.append({'udid':d['identifier'],'identifier':d['identifier'],'name':info.get('name',d.get('name','iPhone')),
+                'model':d.get('modelName',info.get('product','iPhone')),'ios':info.get('ios',d.get('operatingSystemVersion','未知').split()[0]),
+                'paired':info.get('paired',False),'developer':info.get('developer',False)})
+    return modern
 
 def certificate_info(der):
     with tempfile.TemporaryDirectory() as folder:
@@ -183,6 +219,8 @@ def device_dir(udid):
 def make_payload(device,team):
     if not re.fullmatch('[A-Z0-9]{10}',team):raise ValueError('Team ID 必须为 10 位大写字母或数字')
     runtime=device_dir(device['udid']);runtime.mkdir(parents=True,exist_ok=True)
+    from runtime_manager import endpoints
+    ports=endpoints(device['udid'])
     return {'capabilities':{'alwaysMatch':{
         'platformName':'iOS','appium:automationName':'XCUITest','appium:udid':device['udid'],
         'appium:deviceName':device['name'],'appium:noReset':True,'appium:shouldTerminateApp':False,
@@ -190,7 +228,7 @@ def make_payload(device,team):
         'appium:updatedWDABundleId':'com.igconsole.wda.'+team.lower(),
         'appium:allowProvisioningDeviceRegistration':True,'appium:showXcodeLog':True,
         'appium:useNewWDA':False,'appium:usePrebuiltWDA':True,'appium:derivedDataPath':str(runtime/'DerivedData'),
-        'appium:wdaLocalPort':18100,'appium:mjpegServerPort':18101,
+        'appium:wdaLocalPort':ports['wda'],'appium:mjpegServerPort':ports['mjpeg'],'appium:wdaRemotePort':8100,
         'appium:wdaLaunchTimeout':120000,'appium:wdaConnectionTimeout':20000,
         'appium:waitForIdleTimeout':1,'appium:newCommandTimeout':300},'firstMatch':[{}]}}
 
@@ -235,24 +273,35 @@ def _provision(device,team,notify):
         if not fresh['developer']:raise RuntimeError('请开启手机开发者模式，重启并确认开启后再安装。')
         check_xcode()
         previous=signing_record(device['udid'])
-        ensure_server(notify)
-        from runner import call
-        close_other_sessions()
+        from runtime_manager import ensure_server as ensure_device_server,build_legacy,ensure_legacy
+        from runner import call as transport
+        endpoint=ensure_device_server(device['udid'],notify)
+        def call(method,path,data=None,timeout=35):return transport(method,path,data,timeout,server=endpoint['url'])
         old=runtime/'active-session.json'
         if old.exists():
             try:call('DELETE','/session/'+json.loads(old.read_text())['sessionId'],timeout=10)
             except Exception:pass
             old.unlink(missing_ok=True)
         payload=make_payload(fresh,team)
+        if previous and previous.get('team_id')==team:
+            payload['capabilities']['alwaysMatch']['appium:updatedWDABundleId']=previous['bundle_id'].removesuffix('.xctrunner')
+        legacy=str(fresh.get('ios','')).split('.')[0]=='16'
+        if legacy:
+            bundle=payload['capabilities']['alwaysMatch']['appium:updatedWDABundleId']
+            app=build_legacy(fresh,team,bundle,notify)
+            record=profile_record(app,device['udid'],team);record['controller']='legacy16'
+            url=ensure_legacy(device['udid'],record,notify,install=app)
+            payload['capabilities']['alwaysMatch']['appium:webDriverAgentUrl']=url
         build=json.loads(json.dumps(payload));caps=build['capabilities']['alwaysMatch']
         caps['appium:usePrebuiltWDA']=False;caps['appium:useNewWDA']=False
         notify('正在编译、签名并验证控制组件，不主动卸载旧控件。请保持手机解锁；若提示开发者未受信任，请在手机完成信任后重试。')
         try:value=call('POST','/session',build,timeout=360)
         except Exception as exc:
             raise RuntimeError('控制组件未完成安装或启动，不能开始浏览。详细 Xcode 错误已记录在 appium.log；请通过当前聊天发送日志以定位原因。') from exc
-        write_json(old,value)
-        app=runtime/'DerivedData/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app'
-        record=profile_record(app,device['udid'],team)
+        value['server_url']=endpoint['url'];write_json(old,value)
+        if not legacy:
+            app=runtime/'DerivedData/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app'
+            record=profile_record(app,device['udid'],team);record['controller']='modern'
         if previous:record['previous_expires_at']=previous.get('expires_at')
         state,_=expiry_state(record)
         if state=='expired':raise RuntimeError('签名已到期，请检查 Xcode 证书后重试。')
@@ -268,15 +317,5 @@ def signing_record(udid):
     except (OSError,ValueError):return None
 
 def close_other_sessions(keep=None):
-    """The packaged app has one active device and its own loopback Appium server."""
-    if not FROZEN:return
-    from runner import call
-    # Appium 3 no longer exposes GET /sessions. Use only our own saved sessions.
-    for path in (DATA/'devices').glob('*/active-session.json'):
-        try:sid=json.loads(path.read_text()).get('sessionId')
-        except (OSError,ValueError):continue
-        if not sid or sid==keep or not re.fullmatch('[A-Za-z0-9-]{1,80}',sid):continue
-        try:call('DELETE','/session/'+sid,timeout=20)
-        except RuntimeError as exc:
-            if not any(marker in str(exc).lower() for marker in ['invalid session id','session is either terminated','no such session']):raise
-        path.unlink(missing_ok=True)
+    """Compatibility no-op: each device owns its sessions; never close other phones."""
+    return 0

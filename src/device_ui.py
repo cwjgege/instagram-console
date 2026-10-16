@@ -84,12 +84,14 @@ class DeviceWindow:
         if self.busy:return
         self.busy=True;self.install_button.configure(state='disabled');self.use_button.configure(state='disabled')
         self.device_box.configure(state='disabled');self.team_box.configure(state='disabled');self.progress.start(12)
+        selected=self.selected()
+        log_root=dm.device_dir(selected['udid']) if selected else DATA
         def work():
             try:job()
             except Exception as exc:
                 self.events.put(('error',str(exc)))
-                DATA.mkdir(parents=True,exist_ok=True)
-                with (DATA/'device-setup.log').open('a') as log:
+                log_root.mkdir(parents=True,exist_ok=True)
+                with (log_root/'device-setup.log').open('a') as log:
                     log.write(str(exc)+'\n'+str(exc.__cause__ or '')[:5000]+'\n')
             finally:self.events.put(('done',None))
         threading.Thread(target=work,daemon=True).start()
@@ -148,8 +150,11 @@ class DeviceWindow:
             self.status.set(message);self.last_result=message
             messagebox.showwarning('设备配置尚未完成',message,parent=self.window);return
         if not self.panel.save_settings(quiet=True):return
+        callback=self.panel.__dict__.get('on_device_selected')
+        if callback:
+            callback(device);self.status.set('设备已添加，可在总览独立开始。');return
         self.panel.cfg.update(device_udid=device['udid'],device_name=device['name'],runtime_dir=str(dm.device_dir(device['udid'])))
-        dm.write_json(DATA/'config.json',self.panel.cfg)
+        dm.write_json(self.panel.__dict__.get('config_path',DATA/'config.json'),self.panel.cfg)
         self.panel.device_label.set(device['name']+' · USB 实机控制 · 手动运行')
         self.panel.status.set('设备已配置，可点击开始浏览。');self.panel.update_signature()
         self.last_result='已选择 '+device['name']+'。现在可以关闭本窗口并开始浏览。'
@@ -161,7 +166,7 @@ class DeviceWindow:
             if not 1<=hours<=168:raise ValueError()
         except ValueError:self.status.set('提醒时间须为 1～168 小时。');return
         self.panel.cfg['signature_warn_hours']=hours
-        dm.write_json(DATA/'config.json',self.panel.cfg);self.panel.update_signature()
+        dm.write_json(self.panel.__dict__.get('config_path',DATA/'config.json'),self.panel.cfg);self.panel.update_signature()
         self.status.set('提醒设置已保存。')
 
     def open_xcode(self):
@@ -169,7 +174,8 @@ class DeviceWindow:
         except RuntimeError:subprocess.Popen(['/usr/bin/open','macappstore://apps.apple.com/app/id497799835'])
 
     def open_logs(self):
-        DATA.mkdir(parents=True,exist_ok=True);subprocess.Popen(['/usr/bin/open',str(DATA)])
+        device=self.selected();folder=dm.device_dir(device['udid']) if device else DATA
+        folder.mkdir(parents=True,exist_ok=True);subprocess.Popen(['/usr/bin/open',str(folder)])
 
     def poll(self):
         if not self.window.winfo_exists():return
@@ -178,6 +184,7 @@ class DeviceWindow:
                 event,value=self.events.get_nowait()
                 if event=='scanned':
                     directory,devices,teams=value
+                    if self.panel.__dict__.get('pinned_device'):devices=[d for d in devices if d['udid']==self.panel.cfg['device_udid']]
                     previous=self.selected();old_udid=previous['udid'] if previous else self.panel.cfg.get('device_udid')
                     old_team=self.team.get();self.devices=devices
                     self.environment.set('Xcode 已找到：'+str(directory.parent.parent)+' · 内置运行依赖已就绪')
