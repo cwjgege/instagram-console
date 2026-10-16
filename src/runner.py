@@ -79,6 +79,52 @@ def call(method, path, data=None, timeout=35):
         raise RuntimeError(str(value))
     return value
 
+
+def visible_nodes(tree):
+    return [e for e in tree.iter() if e.get('visible')=='true']
+
+def screen_height(tree):
+    heights=[float(e.get('height',0)) for e in tree.iter() if e.tag in ('XCUIElementTypeApplication','XCUIElementTypeWindow')]
+    return max(heights,default=896) or 896
+
+def search_input_node(tree):
+    nodes=visible_nodes(tree)
+    if any(e.tag in ('XCUIElementTypeAlert','XCUIElementTypeSecureTextField') or e.get('name')=='ig-partial-modal-sheet-view-controller-content' for e in nodes):return None
+    allowed={('XCUIElementTypeSearchField','search-text-input'),('XCUIElementTypeTextView','search-bar-text-view')}
+    fields=[e for e in nodes if (e.tag,e.get('name')) in allowed and e.get('enabled','true')=='true'
+        and float(e.get('y',0))+float(e.get('height',44))<=screen_height(tree)*.25]
+    # A bottom follow-up composer is not the keyword search input.
+    return fields[0] if len(fields)==1 else None
+
+def search_layout(tree,term):
+    nodes=visible_nodes(tree);names={e.get('name') for e in nodes}
+    if any(e.tag in ('XCUIElementTypeKeyboard','XCUIElementTypeAlert','XCUIElementTypeSecureTextField') or e.get('name')=='ig-partial-modal-sheet-view-controller-content' for e in nodes):return None
+    if any(e.tag in ('XCUIElementTypeTextField','XCUIElementTypeTextView') and e.get('name')!='search-bar-text-view' for e in nodes):return None
+    if any(e.tag=='XCUIElementTypeTextView' and e.get('value','').strip() for e in nodes):return None
+    legacy=[e for e in nodes if e.tag=='XCUIElementTypeSearchField' and e.get('name')=='search-text-input' and e.get('value','').casefold()==term.casefold()]
+    if len(legacy)==1 and any(e.get('name')=='search-for-you-serp' and e.get('value')=='1' for e in nodes):return 'classic'
+    title=[e for e in nodes if e.tag=='XCUIElementTypeButton' and (e.get('name')==term or e.get('label')==term)
+        and float(e.get('y',0))+float(e.get('height',0))<screen_height(tree)*.2]
+    # Scrolling can hide the tab behind the fixed title; its selected state is still readable.
+    selected=any(e.tag=='XCUIElementTypeButton' and e.get('label','').casefold()=='for you' and e.get('value')=='1' for e in tree.iter())
+    competing=any(e.tag=='XCUIElementTypeButton' and e.get('label','').casefold() in ('profiles','audio','tags') and e.get('value')=='1' for e in nodes)
+    videos=any(e.tag=='XCUIElementTypeCell' and e.get('name')=='media-discovery-cell' and e.get('label','').startswith('Video by ') for e in nodes)
+    if len(title)==1 and selected and not competing and videos and {'search-bar-new-journey-button','search-bar-text-view'}<=names:return 'meta-search'
+    return None
+
+def search_back_name(tree):
+    nodes=visible_nodes(tree)
+    if not any(e.get('name')=='search-bar-with-cancel' for e in nodes):return None
+    buttons=[e.get('name') for e in nodes if e.tag=='XCUIElementTypeButton' and e.get('name') in ('search-bar-back-button','Back')]
+    return buttons[0] if len(buttons)==1 else None
+
+def toggle_is_active(button,kind):
+    if button is None:return False
+    label=button.get('label','').strip().casefold()
+    old={'likes':{'unlike','unlike post'},'saves':{'remove from saved','unsave','unsave post'}}[kind]
+    selected=button.get('value')=='1' or 'Selected' in button.get('traits','').split(', ')
+    return label in old or (selected and label=={'likes':'liked','saves':'saved'}[kind])
+
 class Runner:
     def __init__(self, config, stop=None, notify=None, seconds=None, browse_only=False, model_api_key=None, analysis_only=False):
         self.cfg = {**AUTOMATION_DEFAULTS,**ai_comments.DEFAULTS,**config}
@@ -112,6 +158,7 @@ class Runner:
         self.recovery_times = []
         self.unchanged_swipes = 0
         self.search_videos = 0
+        self.search_attempts = 0
         self.navigation_epoch = 0
         self.reconnections = 0
         self.in_interaction = False
@@ -309,6 +356,9 @@ class Runner:
             elif self.find('BackButton',optional=True):
                 self.click('BackButton')
                 self.wait(.7)
+            elif (back:=search_back_name(self.snapshot())):
+                self.click(back)
+                self.wait(.7)
             elif self.find('Cancel',optional=True):
                 self.click('Cancel')
                 self.wait(.7)
@@ -394,12 +444,17 @@ class Runner:
                 and sum(e.get('name')=='ig icon x pano outline 24' for e in nodes)==1
                 and not any(e.tag=='XCUIElementTypeKeyboard' for e in nodes)
                 and any(e.get('name')=='reels-tab' and e.get('value')=='1' for e in nodes))
-            if fields and not known_chat:
+            search_back=search_back_name(tree)
+            known_search=(bool(fields) and bool(search_back) and all(e.tag=='XCUIElementTypeTextView'
+                and e.get('name')=='search-bar-text-view' and e.get('value','').strip() in ('',*self.cfg['keywords']) for e in fields))
+            if fields and not known_chat and not known_search:
                 raise RuntimeError('页面包含输入框，已停止恢复，保留当前输入内容')
             action=None
             dismiss=[e for e in nodes if e.tag=='XCUIElementTypeButton' and e.get('label','').casefold()=='dismiss']
             if known_chat:
                 self.click('ig icon x pano outline 24');action='close_business_chat'
+            elif known_search:
+                self.click(search_back);action='back'
             elif 'ig-partial-modal-sheet-view-controller-content' in names and len(dismiss)==1:
                 found=self.command('POST','/elements',{'using':'-ios predicate string',
                     'value':"type == 'XCUIElementTypeButton' AND visible == true AND label == 'Dismiss'"})
@@ -467,19 +522,21 @@ class Runner:
         if current['key'] != post['key']:
             raise RuntimeError('视频发生变化，已停止互动')
         button = next((e for e in current['nodes'] if e.get('name')==name),None)
-        if button is None or button.get('label','').casefold() not in allowed_labels:
+        if (button is None or toggle_is_active(button,kind) or button.get('value')=='1'
+            or button.get('label','').casefold() not in allowed_labels):
             return  # Already active, translated UI, or unknown state: never toggle off.
         if not self.reserve(post,kind):
             return
         self.click(name)
-        self.wait(1)
-        after = self.read_reel()
-        label = next((e.get('label','').casefold() for e in after['nodes'] if e.get('name')==name),'')
-        expected = {'likes':{'unlike','unlike post'},'saves':{'remove from saved','unsave','unsave post'}}[kind]
-        if after['key'] == post['key'] and label in expected:
-            self.completed(post,kind)
-        else:
-            raise RuntimeError('互动结果无法确认，已停止；不会重试或重复点击')
+        for delay in (1,.8,1.2):
+            self.wait(delay)
+            after=self.read_reel()
+            if after['key']!=post['key']:break
+            button=next((e for e in after['nodes'] if e.get('name')==name),None)
+            if toggle_is_active(button,kind):
+                self.completed(post,kind)
+                return
+        raise RuntimeError('互动结果无法确认，已停止；不会重试或重复点击')
 
     def comment(self, post):
         if self.cfg['comments_mode']=='ai':
@@ -628,25 +685,33 @@ class Runner:
         else:
             raise RuntimeError('评论已处理，请手动关闭评论面板后重新开始')
 
+    def search_input(self):
+        for attempt in range(3):
+            tree=self.snapshot();field=search_input_node(tree)
+            if field is not None:
+                found=self.command('POST','/elements',{'using':'-ios predicate string','value':
+                    'type == '+json.dumps(field.tag)+' AND name == '+json.dumps(field.get('name'))+' AND visible == true AND enabled == true'})
+                if len(found)==1:return found[0].get(ELEMENT) or found[0].get('ELEMENT')
+            if attempt<2:self.wait(.7)
+        raise NavigationLost('未能唯一识别顶部搜索输入区，尝试返回 Reels')
+
     def search(self, term):
         if not ai_comments.english_text(term):
             self.log('search_skip',message='搜索词不是英文，已跳过')
             return
+        self.search_attempts+=1
         self.click('explore-tab')
         self.wait(.7)
-        eid=self.find('search-text-input')
+        eid=self.search_input()
         self.command('POST','/element/'+eid+'/click',{})
         self.wait(.5)
-        eid=self.find('search-text-input')
+        eid=self.search_input()
         self.command('POST','/element/'+eid+'/clear',{})
         self.command('POST','/element/'+eid+'/value',{'text':term+'\n'})
         self.wait(2)
-        tree=self.snapshot()
-        all_text=' '.join(e.get('label','')+' '+e.get('value','') for e in tree.iter() if e.get('visible')=='true')
-        if term not in all_text:
-            raise RuntimeError('无法确认搜索结果，已停止')
+        tree=self.search_results(term)
         self.searches+=1
-        self.log('search', message='已搜索：'+term)
+        self.log('search',message='已搜索：'+term,layout=search_layout(tree,term),attempt=self.search_attempts)
         seen=set()
         for index in range(int(self.cfg['search_videos_per_query'])):
             tree=self.search_results(term)
@@ -685,15 +750,10 @@ class Runner:
         self.reels()
 
     def search_results(self,term):
-        for attempt in range(3):
+        for attempt in range(4):
             tree=self.snapshot()
-            nodes=[e for e in tree.iter() if e.get('visible')=='true']
-            fields=[e for e in nodes if e.tag=='XCUIElementTypeSearchField' and e.get('name')=='search-text-input']
-            if (len(fields)==1 and fields[0].get('value','').casefold()==term.casefold()
-                and any(e.get('name')=='search-for-you-serp' and e.get('value')=='1' for e in nodes)
-                and not any(e.get('name')=='ig-partial-modal-sheet-view-controller-content' or e.tag in ('XCUIElementTypeKeyboard','XCUIElementTypeTextField','XCUIElementTypeTextView') for e in nodes)):
-                return tree
-            if attempt<2:self.wait(1)
+            if search_layout(tree,term):return tree
+            if attempt<3:self.wait(1)
         raise NavigationLost('搜索结果页面未能确认，返回浏览入口')
 
 
@@ -805,9 +865,9 @@ class Runner:
                         self.ai_comment(post)
                         self.in_interaction=False
                     if (not self.browse_only and self.cfg['enable_search'] and self.cfg['keywords']
-                        and self.searches<self.cfg['max_searches_per_run'] and time.monotonic()>=next_search):
-                        self.search(self.rng.choice(self.cfg['keywords']))
+                        and self.search_attempts<self.cfg['max_searches_per_run'] and time.monotonic()>=next_search):
                         next_search=time.monotonic()+self.rng.uniform(180,360)
+                        self.search(self.rng.choice(self.cfg['keywords']))
                         self.back_depth=0
                         self.position=0
                         continue
@@ -845,7 +905,7 @@ class Runner:
         finally:
             summary={'status':status,'counts':self.counts,'swipes':self.swipes,'searches':self.searches,
                      'log_dir':str(self.log_dir),'run_id':self.run_id,'recoveries':self.recoveries,
-                     'reconnections':self.reconnections,'search_videos':self.search_videos}
+                     'reconnections':self.reconnections,'search_videos':self.search_videos,'search_attempts':self.search_attempts}
             try:
                 atomic_json(self.log_dir/'summary.json',summary)
                 atomic_json(self.runtime/'last-run.json',summary)
