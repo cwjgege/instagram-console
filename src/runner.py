@@ -19,6 +19,8 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 import ai_comments
+import diagnostics
+from page_state import (PageBlocked, classify, visible_nodes, screen_height, search_input_node, search_layout, search_back_name, profile_back_name)
 from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
@@ -26,7 +28,7 @@ AUTOMATION_DEFAULTS = dict(recovery_enabled=True,recovery_attempts=3,recovery_ru
     gesture_left=30,gesture_right=58,gesture_top=28,gesture_bottom=66,
     gesture_distance_min=22,gesture_distance_max=32,gesture_duration_min=220,gesture_duration_max=480,
     reconnect_enabled=True,reconnect_limit=2,close_business_chat=True,usb_wait_seconds=60,
-    search_videos_per_query=2,search_result_scrolls=1,search_watch_min=10,search_watch_max=20)
+    search_videos_per_query=2,search_result_scrolls=1,search_watch_min=10,search_watch_max=20,diagnostic_screenshots=False)
 
 def validate_motion(cfg):
     for low,high,minimum,maximum in [('gesture_left','gesture_right',20,65),
@@ -80,44 +82,6 @@ def call(method, path, data=None, timeout=35):
     return value
 
 
-def visible_nodes(tree):
-    return [e for e in tree.iter() if e.get('visible')=='true']
-
-def screen_height(tree):
-    heights=[float(e.get('height',0)) for e in tree.iter() if e.tag in ('XCUIElementTypeApplication','XCUIElementTypeWindow')]
-    return max(heights,default=896) or 896
-
-def search_input_node(tree):
-    nodes=visible_nodes(tree)
-    if any(e.tag in ('XCUIElementTypeAlert','XCUIElementTypeSecureTextField') or e.get('name')=='ig-partial-modal-sheet-view-controller-content' for e in nodes):return None
-    allowed={('XCUIElementTypeSearchField','search-text-input'),('XCUIElementTypeTextView','search-bar-text-view')}
-    fields=[e for e in nodes if (e.tag,e.get('name')) in allowed and e.get('enabled','true')=='true'
-        and float(e.get('y',0))+float(e.get('height',44))<=screen_height(tree)*.25]
-    # A bottom follow-up composer is not the keyword search input.
-    return fields[0] if len(fields)==1 else None
-
-def search_layout(tree,term):
-    nodes=visible_nodes(tree);names={e.get('name') for e in nodes}
-    if any(e.tag in ('XCUIElementTypeKeyboard','XCUIElementTypeAlert','XCUIElementTypeSecureTextField') or e.get('name')=='ig-partial-modal-sheet-view-controller-content' for e in nodes):return None
-    if any(e.tag in ('XCUIElementTypeTextField','XCUIElementTypeTextView') and e.get('name')!='search-bar-text-view' for e in nodes):return None
-    if any(e.tag=='XCUIElementTypeTextView' and e.get('value','').strip() for e in nodes):return None
-    legacy=[e for e in nodes if e.tag=='XCUIElementTypeSearchField' and e.get('name')=='search-text-input' and e.get('value','').casefold()==term.casefold()]
-    if len(legacy)==1 and any(e.get('name')=='search-for-you-serp' and e.get('value')=='1' for e in nodes):return 'classic'
-    title=[e for e in nodes if e.tag=='XCUIElementTypeButton' and (e.get('name')==term or e.get('label')==term)
-        and float(e.get('y',0))+float(e.get('height',0))<screen_height(tree)*.2]
-    # Scrolling can hide the tab behind the fixed title; its selected state is still readable.
-    selected=any(e.tag=='XCUIElementTypeButton' and e.get('label','').casefold()=='for you' and e.get('value')=='1' for e in tree.iter())
-    competing=any(e.tag=='XCUIElementTypeButton' and e.get('label','').casefold() in ('profiles','audio','tags') and e.get('value')=='1' for e in nodes)
-    videos=any(e.tag=='XCUIElementTypeCell' and e.get('name')=='media-discovery-cell' and e.get('label','').startswith('Video by ') for e in nodes)
-    if len(title)==1 and selected and not competing and videos and {'search-bar-new-journey-button','search-bar-text-view'}<=names:return 'meta-search'
-    return None
-
-def search_back_name(tree):
-    nodes=visible_nodes(tree)
-    if not any(e.get('name')=='search-bar-with-cancel' for e in nodes):return None
-    buttons=[e.get('name') for e in nodes if e.tag=='XCUIElementTypeButton' and e.get('name') in ('search-bar-back-button','Back')]
-    return buttons[0] if len(buttons)==1 else None
-
 def toggle_is_active(button,kind):
     if button is None:return False
     label=button.get('label','').strip().casefold()
@@ -163,6 +127,12 @@ class Runner:
         self.reconnections = 0
         self.in_interaction = False
         self.refresh_required = False
+        self.last_tree = None
+        self.page_state = None
+        self.active_search_term = None
+        self.feature_state = {'search': {'enabled': bool(config.get('enable_search')), 'reason': ''}}
+        self.search_failures = 0
+        self.search_step = None
 
     def log(self, event, **details):
         row = {'time':datetime.now().isoformat(timespec='seconds'),'event':event,**details}
@@ -221,20 +191,41 @@ class Runner:
         eid = self.find(name)
         try:self.command('POST','/element/'+eid+'/click',{})
         except Exception as exc:
-            if name in ('reels-tab','BackButton','explore-tab') and transport_error(exc):
+            if name in ('reels-tab','BackButton','explore-tab','back-button','Back','Cancel','search-bar-back-button','profile-back-button') and transport_error(exc):
                 raise TransportLost('导航时控制连接中断，需重新识别页面') from exc
             raise
+
+    def observe(self, tree):
+        self.last_tree=tree
+        queries=tuple(self.cfg['keywords'])+((self.active_search_term,) if self.active_search_term else ())
+        state=classify(tree,queries,self.active_search_term)
+        if self.page_state is None or self.page_state.kind!=state.kind:
+            self.log('page_state',message=state.reason,state=state.kind,
+                capabilities={'search_input':state.search_input,'video_controls':state.video_controls})
+        self.page_state=state
+        if state.blocked:raise PageBlocked(state.reason)
+        return state
 
     def snapshot(self):
         info = self.mobile('activeAppInfo')
         if info.get('bundleId') != 'com.burbn.instagram':
+            self.last_tree=None
             raise NavigationLost('Instagram 已离开前台')
-        raw = self.command('GET','/source')
-        tree = ET.fromstring(raw)
-        visible = [e for e in tree.iter() if e.get('visible')=='true']
-        if any(e.tag == 'XCUIElementTypeAlert' for e in visible):
-            raise RuntimeError('出现系统或应用弹窗，请手动处理后重新开始')
+        tree = ET.fromstring(self.command('GET','/source'))
+        self.observe(tree)
         return tree
+
+    def diagnose(self, stage, exc):
+        # Diagnostics must never mask the original error or send a UI action.
+        try:
+            screenshot=None
+            if self.cfg.get('diagnostic_screenshots') and self.path and not self.stop.is_set():
+                try:screenshot=call('GET',self.path+'/screenshot',timeout=5)
+                except Exception:pass
+            folder=diagnostics.record(self.log_dir,stage+(':'+self.search_step if stage=='search' and self.search_step else ''),exc,self.last_tree,self.page_state,
+                self.feature_state,self.counts,screenshot)
+            if folder:self.log('diagnostic_saved',message='已记录脱敏页面诊断，可在运行记录中导出')
+        except Exception:pass
 
     def wait_for_usb(self):
         from device_manager import scan_devices
@@ -348,6 +339,11 @@ class Runner:
         self.mobile('activateApp',bundleId='com.burbn.instagram')
         self.wait(1)
         for _ in range(4):
+            state=self.observe(self.snapshot())
+            if state.kind in ('input_unknown','sheet'):raise NavigationLost(state.reason)
+            if state.kind=='profile':
+                self.click(profile_back_name(self.last_tree));self.wait(.7)
+                continue
             if self.find('reels-tab',optional=True):
                 break
             if self.find('back-button',optional=True):
@@ -371,12 +367,13 @@ class Runner:
     def read_reel(self):
         for attempt in range(3):
             tree = self.snapshot()
+            state=self.observe(tree)
             nodes = [e for e in tree.iter() if e.get('visible')=='true']
             names = {e.get('name') for e in nodes}
             is_reels=any(e.get('name')=='reels-tab' and e.get('value')=='1' for e in nodes) or 'Reels' in names or ('reels-viewer' in names and 'sundial-viewer-video-collection-view' in names)
             modal='ig-partial-modal-sheet-view-controller-content' in names
             input_open=any(e.tag in ('XCUIElementTypeTextField','XCUIElementTypeTextView','XCUIElementTypeSecureTextField') for e in nodes)
-            if is_reels and not modal and not input_open and 'like-button' in names and 'comment-button' in names:
+            if state.kind=='reels' and is_reels and not modal and not input_open and 'like-button' in names and 'comment-button' in names:
                 break
             if attempt<2:
                 self.wait(.7)
@@ -424,15 +421,11 @@ class Runner:
                 self.wait(1)
                 previous_action='activate'
                 continue
-            tree=self.snapshot()  # System alerts are handled by snapshot and never auto-dismissed.
+            tree=self.snapshot()
+            state=self.observe(tree)  # System alerts are handled by snapshot and never auto-dismissed.
             nodes=[e for e in tree.iter() if e.get('visible')=='true']
             names={e.get('name') for e in nodes}
-            text=' '.join(e.get('label','') for e in nodes if e.tag=='XCUIElementTypeStaticText').casefold()
-            if any(marker in text for marker in ['confirm your identity','verify your identity','suspicious activity',
-                'try again later','we restrict certain activity','account has been suspended','security check',
-                '确认你的身份','验证你的身份','操作过于频繁','稍后重试']):
-                raise RuntimeError('出现验证、操作限制或账号提示，请手动处理')
-            fields=[e for e in nodes if e.tag in ['XCUIElementTypeTextField','XCUIElementTypeTextView','XCUIElementTypeSecureTextField']]
+            fields=[e for e in nodes if e.tag in ['XCUIElementTypeTextField','XCUIElementTypeTextView','XCUIElementTypeSecureTextField','XCUIElementTypeSearchField']]
             # An observed ad end card includes a default inquiry, not a composed DM.
             # Close only this complete signature; modified input stays untouched.
             known_chat=(self.cfg['close_business_chat'] and len(fields)==1
@@ -445,13 +438,15 @@ class Runner:
                 and not any(e.tag=='XCUIElementTypeKeyboard' for e in nodes)
                 and any(e.get('name')=='reels-tab' and e.get('value')=='1' for e in nodes))
             search_back=search_back_name(tree)
-            known_search=(bool(fields) and bool(search_back) and all(e.tag=='XCUIElementTypeTextView'
-                and e.get('name')=='search-bar-text-view' and e.get('value','').strip() in ('',*self.cfg['keywords']) for e in fields))
-            if fields and not known_chat and not known_search:
+            search_back=search_back or next((name for name in ('Cancel','BackButton') if name in names),None)
+            known_search=state.kind in ('search_input','search_context','search_results') and bool(search_back)
+            if (fields or state.kind=='input_unknown') and not known_chat and not known_search:
                 raise RuntimeError('页面包含输入框，已停止恢复，保留当前输入内容')
             action=None
             dismiss=[e for e in nodes if e.tag=='XCUIElementTypeButton' and e.get('label','').casefold()=='dismiss']
-            if known_chat:
+            if profile_back_name(tree):
+                self.click(profile_back_name(tree));action='back'
+            elif known_chat:
                 self.click('ig icon x pano outline 24');action='close_business_chat'
             elif known_search:
                 self.click(search_back);action='back'
@@ -685,9 +680,80 @@ class Runner:
         else:
             raise RuntimeError('评论已处理，请手动关闭评论面板后重新开始')
 
+    def close_known_sheet(self, tree):
+        nodes=visible_nodes(tree)
+        if not any(e.get('name')=='ig-partial-modal-sheet-view-controller-content' for e in nodes):return False
+        dismiss=[e for e in nodes if e.tag=='XCUIElementTypeButton' and e.get('label','').casefold()=='dismiss']
+        if len(dismiss)!=1:return False
+        found=self.command('POST','/elements',{'using':'-ios predicate string',
+            'value':"type == 'XCUIElementTypeButton' AND visible == true AND label == 'Dismiss'"})
+        if len(found)!=1:return False
+        eid=found[0].get(ELEMENT) or found[0].get('ELEMENT')
+        self.command('POST','/element/'+eid+'/click',{})
+        return True
+
+    def return_from_search(self):
+        """Small independent navigation budget; never consumes general recovery quota."""
+        if not self.cfg.get('recovery_enabled',True):
+            raise RuntimeError('搜索已禁用，但自动恢复已关闭，请手动返回短视频页')
+        for attempt in range(5):
+            self.check()
+            tree=self.snapshot();state=self.observe(tree)
+            if state.kind=='reels':
+                self.navigation_epoch+=1
+                self.position=self.back_depth=self.stagnant=self.unchanged_swipes=0
+                self.log('search_resumed',message='搜索已暂停，本轮继续短视频浏览')
+                return
+            if state.kind=='input_unknown':raise PageBlocked(state.reason)
+            names={e.get('name') for e in visible_nodes(tree)}
+            back=search_back_name(tree)
+            if state.kind=='profile' and profile_back_name(tree):
+                self.click(profile_back_name(tree))
+            elif state.kind in ('search_input','search_context','search_results'):
+                back=back or next((x for x in ('Cancel','BackButton','back-button') if x in names),None)
+                if back:self.click(back)
+                elif state.kind=='search_results' and 'reels-tab' in names:self.click('reels-tab')
+                else:raise RuntimeError('搜索已暂停，但没有识别到安全返回入口，请手动返回短视频页')
+            elif state.kind=='sheet' and self.close_known_sheet(tree):
+                pass
+            elif state.kind in ('explore','main','unknown') and 'reels-tab' in names:
+                self.click('reels-tab')
+            else:
+                raise RuntimeError('搜索已暂停，当前页面无法安全返回，请手动处理')
+            self.log('search_return',message='正在通过已识别入口返回短视频页',attempt=attempt+1)
+            self.wait(1)
+        # Validate after the last permitted navigation action.
+        if self.observe(self.snapshot()).kind=='reels':
+            self.navigation_epoch+=1
+            self.position=self.back_depth=self.stagnant=self.unchanged_swipes=0
+            self.log('search_resumed',message='搜索已暂停，本轮继续短视频浏览')
+            return
+        raise RuntimeError('搜索已暂停，返回短视频页的尝试已用完，请手动处理')
+
+    def search_optional(self, term):
+        if not self.feature_state['search']['enabled']:return False
+        self.active_search_term=term
+        try:
+            self.search(term)
+            return True
+        except (Halt,PageBlocked):raise
+        except Exception as exc:
+            self.search_failures+=1
+            self.feature_state['search']={'enabled':False,'reason':'本轮搜索异常，已暂停搜索'}
+            self.diagnose('search',exc)
+            self.log('feature_disabled',message='本轮搜索已暂停，正在确认能否继续短视频浏览',feature='search',reason=diagnostics.redact(str(exc)))
+            if isinstance(exc,TransportLost) or transport_error(exc):
+                raise TransportLost('搜索期间连接中断，暂停搜索并尝试恢复连接') from exc
+            self.return_from_search()
+            return False
+        finally:
+            self.active_search_term=None
+
     def search_input(self):
         for attempt in range(3):
-            tree=self.snapshot();field=search_input_node(tree)
+            tree=self.snapshot()
+            if self.observe(tree).kind=='input_unknown':raise PageBlocked('页面包含未知输入内容，已保留，请手动处理')
+            field=search_input_node(tree)
             if field is not None:
                 found=self.command('POST','/elements',{'using':'-ios predicate string','value':
                     'type == '+json.dumps(field.tag)+' AND name == '+json.dumps(field.get('name'))+' AND visible == true AND enabled == true'})
@@ -700,15 +766,20 @@ class Runner:
             self.log('search_skip',message='搜索词不是英文，已跳过')
             return
         self.search_attempts+=1
+        self.search_step='open_explore'
         self.click('explore-tab')
         self.wait(.7)
+        self.search_step='locate_input'
         eid=self.search_input()
         self.command('POST','/element/'+eid+'/click',{})
         self.wait(.5)
+        self.search_step='focus_input'
         eid=self.search_input()
+        self.search_step='submit_query'
         self.command('POST','/element/'+eid+'/clear',{})
         self.command('POST','/element/'+eid+'/value',{'text':term+'\n'})
         self.wait(2)
+        self.search_step='verify_results'
         tree=self.search_results(term)
         self.searches+=1
         self.log('search',message='已搜索：'+term,layout=search_layout(tree,term),attempt=self.search_attempts)
@@ -729,6 +800,7 @@ class Runner:
             if len(found)!=1:
                 self.log('search_skip',message='搜索视频控件不唯一，跳过')
                 break
+            self.search_step='open_video'
             self.command('POST','/element/'+found[0][ELEMENT]+'/click',{})
             self.wait(1.5)
             post=self.read_reel()
@@ -739,6 +811,7 @@ class Runner:
             current=self.read_reel()
             if 'back-button' not in {e.get('name') for e in current['nodes']}:
                 raise NavigationLost('搜索视频缺少可识别的返回入口')
+            self.search_step='return_results'
             self.click('back-button');self.wait(1)
             self.search_results(term)
             if index+1<int(self.cfg['search_videos_per_query']):
@@ -747,7 +820,9 @@ class Runner:
                     self.gesture('up');self.wait(1)
                     self.search_results(term)
                     self.log('search_scroll',message='已滚动并重新确认搜索结果',query=term)
+        self.search_step='return_reels'
         self.reels()
+        self.search_step=None
 
     def search_results(self,term):
         for attempt in range(4):
@@ -865,9 +940,10 @@ class Runner:
                         self.ai_comment(post)
                         self.in_interaction=False
                     if (not self.browse_only and self.cfg['enable_search'] and self.cfg['keywords']
-                        and self.search_attempts<self.cfg['max_searches_per_run'] and time.monotonic()>=next_search):
+                        and self.feature_state['search']['enabled'] and self.search_attempts<self.cfg['max_searches_per_run'] and time.monotonic()>=next_search):
                         next_search=time.monotonic()+self.rng.uniform(180,360)
-                        self.search(self.rng.choice(self.cfg['keywords']))
+                        self.search_optional(self.rng.choice(self.cfg['keywords']))
+                        last_key=None
                         self.back_depth=0
                         self.position=0
                         continue
@@ -890,6 +966,7 @@ class Runner:
                     continue
                 except NavigationLost as exc:
                     if self.in_interaction:raise RuntimeError('互动时页面变化，已停止以避免误操作') from exc
+                    self.diagnose('navigation',exc)
                     self.log('navigation_lost',message=str(exc))
                     try:self.recover_reels()
                     except TransportLost:self.recover_connection()
@@ -899,13 +976,16 @@ class Runner:
             self.log('stopped',message=str(e))
             status='stopped' if self.stop.is_set() or (self.runtime/'STOP').exists() else 'complete'
         except Exception as e:
+            self.diagnose('fatal',e)
             status='error'
             message='手机控制连接中断，当前动作结果未确认，已停止且不会重发' if transport_error(e) else str(e)
             self.log('error',message=message,detail=str(e)[:1800])
         finally:
             summary={'status':status,'counts':self.counts,'swipes':self.swipes,'searches':self.searches,
                      'log_dir':str(self.log_dir),'run_id':self.run_id,'recoveries':self.recoveries,
-                     'reconnections':self.reconnections,'search_videos':self.search_videos,'search_attempts':self.search_attempts}
+                     'reconnections':self.reconnections,'search_videos':self.search_videos,'search_attempts':self.search_attempts,
+                     'feature_state':self.feature_state,'search_failures':self.search_failures,
+                     'page_state':self.page_state.kind if self.page_state else 'unknown'}
             try:
                 atomic_json(self.log_dir/'summary.json',summary)
                 atomic_json(self.runtime/'last-run.json',summary)

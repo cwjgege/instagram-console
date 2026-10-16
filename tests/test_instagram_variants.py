@@ -48,7 +48,7 @@ class Variants(unittest.TestCase):
  def test_failed_search_is_cooled_down_before_retry(self):
   clock=[0.0];counter=[0];self.r.seconds=120;self.r.cfg.update(device_udid='A'*20,max_swipes_per_run=20,enable_comments=False)
   self.r.wait=lambda seconds:clock.__setitem__(0,clock[0]+seconds)
-  self.r.connect=Mock();self.r.reels=Mock();self.r.recover_reels=Mock()
+  self.r.connect=Mock();self.r.reels=Mock();self.r.recover_reels=Mock();self.r.return_from_search=Mock()
   def post():
    counter[0]+=1;return {'key':str(counter[0]),'author':'demo','caption':'unrelated','nodes':[]}
   self.r.read_reel=post;self.r.swipe=lambda direction:setattr(self.r,'swipes',self.r.swipes+1)
@@ -58,7 +58,7 @@ class Variants(unittest.TestCase):
   self.r.search=Mock(side_effect=failed)
   with patch('runner.time.monotonic',side_effect=lambda:clock[0]),patch.dict('os.environ',{'IG_CONSOLE_LOCK_DIR':str(Path(self.tmp.name)/'locks')}):
    self.assertEqual(self.r.run(),'complete')
-  self.r.search.assert_called_once();self.r.recover_reels.assert_called_once()
+  self.r.search.assert_called_once();self.r.recover_reels.assert_not_called();self.r.return_from_search.assert_called_once()
  def post(self,label='Like',selected=False,key='post'):
   return {'key':key,'author':'demo','nodes':[node(name='like-button',label=label,**({'value':'1','traits':'Selected, Button'} if selected else {}))]}
  def test_selected_liked_state_is_confirmed(self):self.assertTrue(toggle_is_active(self.post('Liked',True)['nodes'][0],'likes'))

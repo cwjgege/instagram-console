@@ -9,7 +9,8 @@ import time
 import traceback
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
+import diagnostics
 from pathlib import Path
 from runner import ROOT, Runner, atomic_json, AUTOMATION_DEFAULTS, validate_motion
 from ai_comments import DEFAULTS, PROVIDERS, english_text
@@ -56,6 +57,8 @@ class Panel:
         state_frame=ttk.Frame(outer); state_frame.pack(fill='x')
         self.status=tk.StringVar(value='已停止，点击开始即可运行')
         ttk.Label(state_frame,textvariable=self.status,style='Status.TLabel',wraplength=710).pack(anchor='w')
+        self.feature_status=tk.StringVar(value='搜索状态：按本轮设置启用；异常时暂停搜索，确认页面后继续浏览')
+        ttk.Label(state_frame,textvariable=self.feature_status,wraplength=710).pack(anchor='w')
         self.stats=tk.StringVar(value='浏览 0   ·   翻页 0   ·   点赞 0   ·   收藏 0   ·   评论 0   ·   搜索 0')
         ttk.Label(state_frame,textvariable=self.stats).pack(anchor='w',pady=(8,14))
         actions=ttk.Frame(outer); actions.pack(fill='x',pady=(0,18))
@@ -130,8 +133,13 @@ class Panel:
         self.save_button.pack(anchor='e',pady=(7,0)); self.settings_widgets.append(self.save_button)
         self.refresh_rules(0)
         self.log_text=tk.Text(logs,height=15,wrap='word',font=('PingFang SC',11),state='disabled')
+        log_footer=ttk.Frame(logs);log_footer.pack(side='bottom',fill='x',pady=(8,0))
         self.log_text.pack(fill='both',expand=True)
-        ttk.Button(logs,text='打开日志文件夹',command=self.open_logs).pack(anchor='e',pady=(8,0))
+        export_row=ttk.Frame(log_footer);export_row.pack(fill='x')
+        self.include_diagnostic_images=tk.BooleanVar(value=False)
+        ttk.Checkbutton(export_row,text='导出时包含已记录截图（可能含账号及内容）',variable=self.include_diagnostic_images).pack(side='left')
+        ttk.Button(export_row,text='导出诊断包',command=self.export_diagnostics).pack(side='right')
+        ttk.Button(log_footer,text='打开日志文件夹',command=self.open_logs).pack(anchor='e',pady=(8,0))
         self.build_ai_settings()
         self.build_motion_settings()
         self.build_search_settings()
@@ -147,8 +155,31 @@ class Panel:
         if FROZEN and not self.cfg.get('device_udid'):root.after(650,self.open_devices)
 
     def build_search_settings(self):
-        frame=ttk.Frame(self.tabs,padding=16)
-        self.tabs.add(frame,text='搜索浏览')
+        page=ttk.Frame(self.tabs,padding=12)
+        self.tabs.add(page,text='搜索浏览')
+        footer=ttk.Frame(page);footer.pack(side='bottom',fill='x',pady=(8,0))
+        area=ttk.Frame(page);area.pack(fill='both',expand=True)
+        canvas=tk.Canvas(area,highlightthickness=0,borderwidth=0)
+        scrollbar=ttk.Scrollbar(area,orient='vertical',command=canvas.yview)
+        scrollbar.pack(side='right',fill='y');canvas.pack(side='left',fill='both',expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        frame=ttk.Frame(canvas,padding=4)
+        window=canvas.create_window((0,0),window=frame,anchor='nw')
+        frame.bind('<Configure>',lambda event:canvas.configure(scrollregion=canvas.bbox('all')))
+        def resize(event):
+            canvas.itemconfigure(window,width=event.width)
+            for child in frame.winfo_children():
+                if isinstance(child,ttk.Label):child.configure(wraplength=max(220,event.width-16))
+        canvas.bind('<Configure>',resize)
+        def scroll(event):
+            widget=event.widget
+            if widget.winfo_class() in ('TCombobox','TSpinbox'):return
+            while widget is not None:
+                if widget==page:
+                    if canvas.yview()!=(0.0,1.0) and event.delta:canvas.yview_scroll(-1 if event.delta>0 else 1,'units')
+                    return
+                widget=getattr(widget,'master',None)
+        self.root.bind('<MouseWheel>',scroll,add='+')
         ttk.Label(frame,text='搜索后打开可识别的视频，观看后返回结果，再滚动查找下一条。',wraplength=680).pack(anchor='w',pady=(0,16))
         self.search_numbers={}
         for key,label,low,high in [('search_videos_per_query','每次搜索观看视频数',1,5),
@@ -160,11 +191,15 @@ class Panel:
             widget=ttk.Spinbox(row,from_=low,to=high,textvariable=var,width=5)
             widget.pack(side='left');self.settings_widgets.append(widget)
         ttk.Label(frame,text='搜索结果视频仅观看。遇到无法识别的页面会尝试返回；出现验证或输入草稿时停止。\n恢复额度按最近 5 分钟计算，单次没有翻动会先等待复查，连续三次不变才恢复。',wraplength=680).pack(anchor='w',pady=(16,16))
-        widget=ttk.Button(frame,text='诊断运行 20 分钟（含搜索，不互动）',command=lambda:self.start(diagnostic=True))
-        widget.pack(anchor='w');self.settings_widgets.append(widget)
+        self.diagnostic_images=tk.BooleanVar(value=self.cfg.get('diagnostic_screenshots',False))
+        widget=ttk.Checkbutton(frame,text='异常时在本机记录页面截图（可能含账号及内容，默认不导出）',variable=self.diagnostic_images)
+        widget.pack(anchor='w',pady=(0,8));self.settings_widgets.append(widget)
+        ttk.Label(frame,text='搜索异常后，本轮暂停搜索；只有确认返回短视频页才继续。重新开始会重新启用搜索。',wraplength=680).pack(anchor='w',pady=(0,12))
+        widget=ttk.Button(footer,text='诊断运行 20 分钟（含搜索，不互动）',command=lambda:self.start(diagnostic=True))
+        widget.pack(side='left');self.settings_widgets.append(widget)
         self.diagnostic_button=widget
-        widget=ttk.Button(frame,text='保存搜索浏览设置',command=self.save_settings)
-        widget.pack(anchor='e',pady=(14,0));self.settings_widgets.append(widget)
+        widget=ttk.Button(footer,text='保存搜索浏览设置',command=self.save_settings)
+        widget.pack(side='right');self.settings_widgets.append(widget)
 
     def log_ui(self,event,**details):
         try:
@@ -358,6 +393,7 @@ class Panel:
         return list(dict.fromkeys(s.strip() for s in text.replace('，',',').split(',') if s.strip()))
 
     def save_settings(self,quiet=False):
+        self.cfg['diagnostic_screenshots']=self.diagnostic_images.get()
         try:
             minutes=int(self.minutes.get())
             if not 1<=minutes<=120:
@@ -566,10 +602,25 @@ class Panel:
         elif self.run_ui_active and self.phase_text.startswith('正在'):
             self.status.set(self.phase_text+f'（已等待 {int(time.monotonic()-self.phase_started)} 秒）')
         if hasattr(self,'runner'):
+            feature=self.runner.feature_state['search']
+            self.feature_status.set('搜索状态：'+('本轮启用' if feature['enabled'] else (feature['reason'] or '本轮未启用')))
             c=self.runner.counts
             self.stats.set(f"浏览 {c['watched']} · 翻页 {self.runner.swipes} · 点赞 {c['likes']} · 收藏 {c['saves']} · 评论 {c['comments']} · 搜索 {self.runner.searches} · 恢复 {self.runner.recoveries} · 重连 {self.runner.reconnections}")
         if self.closing and (not self.worker or not self.worker.is_alive()):
             self.root.destroy(); return True
+
+    def export_diagnostics(self):
+        if self.worker and self.worker.is_alive():
+            self.status.set('请先停止当前任务，再导出完整诊断包。');return
+        path=filedialog.asksaveasfilename(parent=self.root,title='导出最近一轮诊断',
+            defaultextension='.zip',initialfile='Instagram-diagnostics-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.zip',
+            filetypes=[('ZIP 诊断包','*.zip')])
+        if not path:return
+        try:
+            result=diagnostics.export(self.cfg['runtime_dir'],path,self.include_diagnostic_images.get())
+            self.status.set('诊断包已导出：'+Path(path).name)
+            self.append('诊断包包含 '+str(result['cases'])+' 个异常案例；配置、密钥和原始日志未导出。')
+        except Exception as exc:messagebox.showerror('导出失败',str(exc),parent=self.root)
 
     def open_logs(self):
         folder=Path(self.cfg['runtime_dir'])/'runs'; folder.mkdir(exist_ok=True)

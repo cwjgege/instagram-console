@@ -93,5 +93,6 @@
   ],
   "signature_warn_hours": 48,
   "device_udid": "",
-  "runtime_dir": "work/source-runtime"
+  "runtime_dir": "work/source-runtime",
+  "diagnostic_screenshots": false
 }

@@ -28,7 +28,7 @@ class SearchBrowsing(unittest.TestCase):
   self.assertEqual(self.r.search_videos,2);self.assertEqual(self.r.counts['watched'],2)
   self.assertEqual(self.r.click.call_args_list.count(unittest.mock.call('back-button')),2)
   self.r.gesture.assert_called_once_with('up');self.r.reels.assert_called_once()
-  self.assertEqual([e['event'] for e in self.events],['search','search_watch','search_scroll','search_watch'])
+  self.assertEqual([e['event'] for e in self.events if e['event']!='page_state'],['search','search_watch','search_scroll','search_watch'])
   self.assertEqual(self.r.counts['likes']+self.r.counts['saves']+self.r.counts['comments'],0)
  def test_empty_results_do_not_tap_arbitrary_locations(self):
   self.r.snapshot.return_value=results(video=False);self.r.search('AI video creation')
