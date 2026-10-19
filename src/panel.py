@@ -298,7 +298,7 @@ class Panel:
         w=ttk.Checkbutton(frame,text='自动关闭已识别的广告咨询面板（不发送）',variable=self.close_business_chat)
         w.pack(anchor='w');self.settings_widgets.append(w)
         row=ttk.Frame(frame);row.pack(fill='x',pady=10)
-        ttk.Label(row,text='本轮重连上限').pack(side='left')
+        ttk.Label(row,text='5 分钟内重连上限').pack(side='left')
         self.reconnect_limit=tk.StringVar(value=str(self.cfg['reconnect_limit']))
         w=ttk.Spinbox(row,from_=1,to=3,textvariable=self.reconnect_limit,width=4)
         w.pack(side='left',padx=12);self.settings_widgets.append(w)
@@ -527,6 +527,11 @@ class Panel:
             self.status.set('设备配置正在进行，请等待完成。');return
         if FROZEN or self.cfg.get('managed_device'):
             import device_manager as dm
+            blocker=dm.setup_blocker(self.cfg.get('device_udid',''))
+            if blocker:
+                self.status.set(blocker)
+                if not self.__dict__.get('batch_mode'):self.open_devices()
+                return
             record=dm.signing_record(self.cfg.get('device_udid',''))
             if dm.expiry_state(record)[0] in ('unknown','expired'):
                 self.status.set('请先完成设备配置或重新签名。')

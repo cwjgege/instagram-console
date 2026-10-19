@@ -15,3 +15,7 @@ Use macOS native controls and PingFang SC. Keep a restrained blue accent for pri
 - Closing a device window hides it. Closing the workspace stops and releases all device sessions.
 
 Palette: ink `#182329`, secondary text `#54636E`, blue `#185ADB`, green `#176948`, amber `#825B12`, red `#A52D38`. Native control backgrounds follow the macOS theme. Status text remains understandable without color.
+
+- Setup distinguishes USB pairing, installed controller inventory, signature validity, and a verified control session. Missing Settings developer entries alone never imply failure.
+- Install failure feedback identifies the current attempt and next action. Verification of an existing signed build has its own persistent button; it does not request a new signature.
+- Reconnection limits explicitly describe a five-minute window. Empty transport errors still display an actionable reason.

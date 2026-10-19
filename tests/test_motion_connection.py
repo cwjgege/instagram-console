@@ -67,11 +67,12 @@ class MotionConnection(unittest.TestCase):
    with self.assertRaises(RuntimeError):self.r.command('POST','/elements',{})
    self.assertEqual(call.call_count,1)
  def test_usb_reappearance_waits_without_switching_device(self):
-  with patch('device_manager.scan_devices',side_effect=[[],[{'udid':'other'}],[{'udid':self.r.cfg['device_udid']}]]) as scan:
-   self.r.wait_for_usb();self.assertEqual(scan.call_count,3)
+  self.r.cfg['device_udid']='a'*40
+  with patch('device_manager.usb_serials',side_effect=[set(),{'b'*40},{'a'*40}]),patch('device_manager.scan_devices',return_value=[{'udid':'a'*40,'ios':'16.7','paired':True,'developer':True}]) as scan:
+   self.r.wait_for_usb();scan.assert_called_once()
   self.assertEqual([e['event'] for e in self.events],['device_wait','device_ready'])
  def test_usb_timeout_is_clear_and_bounded(self):
-  with patch('device_manager.scan_devices',return_value=[]),patch('runner.time.monotonic',side_effect=[0,61]):
+  with patch('device_manager.usb_serials',return_value=set()),patch('runner.time.monotonic',side_effect=[0,61]):
    with self.assertRaisesRegex(RuntimeError,'USB.*超时'):self.r.wait_for_usb()
  def test_usb_wait_can_be_stopped(self):
   self.r.stop.set()
@@ -102,3 +103,47 @@ class MotionConnection(unittest.TestCase):
   self.assertEqual(self.r.reconnections,1)
 
 if __name__=='__main__':unittest.main()
+
+class RecoveryWindow(unittest.TestCase):
+ def setUp(self):
+  self.temp=tempfile.TemporaryDirectory();self.r=Runner({**CFG,'runtime_dir':self.temp.name},notify=lambda _:None);self.r.wait=Mock();self.r.connect=Mock();self.r.recover_reels=Mock()
+ def tearDown(self):self.temp.cleanup()
+ def test_old_successful_reconnections_do_not_exhaust_future_window(self):
+  self.r.reconnections=10;self.r.reconnect_times=[0,1]
+  with patch('runner.time.monotonic',return_value=400):self.r.recover_connection()
+  self.r.connect.assert_called_once();self.assertEqual(self.r.reconnections,11)
+ def test_recent_reconnections_still_enforce_bounded_recovery(self):
+  self.r.reconnect_times=[399]*self.r.cfg['reconnect_limit']
+  with patch('runner.time.monotonic',return_value=400):
+   with self.assertRaisesRegex(RuntimeError,'5 分钟'):self.r.recover_connection()
+  self.r.connect.assert_not_called()
+
+
+class TransportResponses(unittest.TestCase):
+ def test_empty_service_failure_is_not_lost_as_blank_runtime_error(self):
+  import io
+  from urllib.error import HTTPError
+  from runner import call,ControlHTTPError
+  error=HTTPError('http://127.0.0.1/session/x/source',503,'Service Unavailable',{},io.BytesIO(b''))
+  with patch('runner.urlopen',side_effect=error):
+   with self.assertRaises(ControlHTTPError) as result:call('GET','/session/x/source')
+  self.assertIn('503',str(result.exception));self.assertTrue(transport_error(result.exception))
+ def test_empty_session_404_is_reconnectable(self):
+  import io
+  from urllib.error import HTTPError
+  from runner import call,ControlHTTPError
+  error=HTTPError('http://127.0.0.1/session/x/source',404,'Not Found',{},io.BytesIO(b''))
+  with patch('runner.urlopen',side_effect=error):
+   with self.assertRaises(ControlHTTPError) as result:call('GET','/session/x/source')
+  self.assertTrue(transport_error(result.exception))
+ def test_structured_invalid_session_keeps_error_type_when_message_is_empty(self):
+  import io
+  from urllib.error import HTTPError
+  from runner import call,ControlHTTPError
+  error=HTTPError('http://127.0.0.1/session/x/source',404,'Not Found',{},io.BytesIO(b'{"value":{"error":"invalid session id","message":""}}'))
+  with patch('runner.urlopen',side_effect=error):
+   with self.assertRaises(ControlHTTPError) as result:call('GET','/session/x/source')
+  self.assertIn('invalid session id',str(result.exception));self.assertTrue(transport_error(result.exception))
+ def test_business_error_is_not_treated_as_transport(self):
+  from runner import ControlHTTPError
+  self.assertFalse(transport_error(ControlHTTPError('invalid selector',400,'invalid selector')))

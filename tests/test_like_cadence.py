@@ -27,7 +27,7 @@ class LikeCadence(unittest.TestCase):
  def test_uncertain_write_propagates_without_automatic_retry(self):
   self.r.like_next=1;self.r.toggle_on.side_effect=RuntimeError('unconfirmed')
   with self.assertRaisesRegex(RuntimeError,'unconfirmed'):self.post('a')
-  self.post('a');self.r.toggle_on.assert_called_once();self.assertFalse(self.r.in_interaction)
+  self.post('a');self.r.toggle_on.assert_called_once();self.assertTrue(self.r.in_interaction)
  def test_bad_interval_rejected(self):
   for change in [{'like_interval_min':0},{'like_interval_min':9,'like_interval_max':3},{'like_interval_max':101}]:
    with self.assertRaises(ValueError):validate_motion({**AUTOMATION_DEFAULTS,**change})

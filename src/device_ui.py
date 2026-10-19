@@ -8,6 +8,7 @@ from tkinter import ttk,messagebox
 from pathlib import Path
 from app_paths import DATA,FROZEN
 import device_manager as dm
+import ui_theme as ui
 
 class DeviceWindow:
     def __init__(self,panel):
@@ -30,7 +31,7 @@ class DeviceWindow:
         self.form_id=self.canvas.create_window((0,0),window=body,anchor='nw')
         body.bind('<Configure>',lambda event:self.canvas.configure(scrollregion=self.canvas.bbox('all')))
         self.canvas.bind('<Configure>',lambda event:self.resize_form(event,body))
-        self.window.bind('<MouseWheel>',self.scroll_form,add='+')
+        ui.bind_form_scroll(self.window,self.canvas,body)
         ttk.Label(body,text='连接 iPhone，完成首次配置',font=('PingFang SC',20,'bold')).pack(anchor='w')
         ttk.Label(body,text='1  检查 Xcode  →  2  选择 USB 设备  →  3  签名安装  →  4  开始使用',wraplength=720).pack(anchor='w',pady=(8,16))
         self.environment=tk.StringVar(value='正在检测环境…')
@@ -44,6 +45,7 @@ class DeviceWindow:
         self.device_box.pack(fill='x',pady=(5,8));self.device_box.bind('<<ComboboxSelected>>',lambda _:self.show_device())
         self.detail=tk.StringVar(value='请连接手机、解锁，并在手机上选择“信任此电脑”。')
         ttk.Label(body,textvariable=self.detail,wraplength=710).pack(anchor='w')
+        ttk.Label(body,text='“信任此电脑”是 USB 配对；“VPN 与设备管理”是开发者 App 验证。没有对应条目不一定异常，是否就绪以组件实际安装和连接验证为准。',style='Muted.TLabel',wraplength=710).pack(anchor='w',pady=(8,0))
         ttk.Label(body,text='签名团队（与手机 Apple ID 无需相同）').pack(anchor='w',pady=(16,5))
         self.team=tk.StringVar();self.team_box=ttk.Combobox(body,textvariable=self.team)
         self.team_box.pack(fill='x')
@@ -60,7 +62,9 @@ class DeviceWindow:
         self.install_button=ttk.Button(actions,text='安装 / 重新签名控制组件',command=self.install)
         self.install_button.pack(side='left')
         self.use_button=ttk.Button(actions,text='使用所选设备',command=self.use_device)
-        self.use_button.pack(side='left',padx=12)
+        self.use_button.pack(side='left',padx=8)
+        verify_row=ttk.Frame(footer);verify_row.pack(fill='x',pady=(6,0))
+        self.verify_button=ttk.Button(verify_row,text='重新验证已安装组件（不重新签名）',command=self.verify,state='disabled');self.verify_button.pack(side='left')
         self.window.protocol('WM_DELETE_WINDOW',self.close)
         self.window.after(200,self.poll);self.window.after(15000,self.auto_scan)
         self.scan()
@@ -83,6 +87,7 @@ class DeviceWindow:
     def task(self,job):
         if self.busy:return
         self.busy=True;self.install_button.configure(state='disabled');self.use_button.configure(state='disabled')
+        if hasattr(self,'verify_button'):self.verify_button.configure(state='disabled')
         self.device_box.configure(state='disabled');self.team_box.configure(state='disabled');self.progress.start(12)
         selected=self.selected()
         log_root=dm.device_dir(selected['udid']) if selected else DATA
@@ -102,6 +107,10 @@ class DeviceWindow:
             directory=dm.check_xcode()
             if FROZEN:dm.prepare_vendor(lambda message:self.events.put(('status',message)))
             devices=dm.scan_devices();teams=dm.signing_teams()
+            for device in devices:
+                if device.get('paired'):
+                    try:device['controller_apps']=dm.controller_apps(device['udid'])
+                    except (RuntimeError,subprocess.SubprocessError,OSError):device['controller_apps']=None
             self.events.put(('scanned',(directory,devices,teams)))
         if not getattr(self,'last_result',''):self.status.set('正在检测 Xcode、USB 设备与签名团队…')
         self.task(job)
@@ -116,11 +125,20 @@ class DeviceWindow:
         if not device:
             self.detail.set('未检测到 USB iPhone。请连接、解锁、信任此电脑，然后重新检测。')
             self.signature.set('尚未配置设备。');return
-        self.detail.set(f"{device['model']} · iOS {device['ios']} · 信任配对：{'已完成' if device['paired'] else '待完成'} · 开发者模式：{'已开启' if device['developer'] else '待开启'}\n设置 → 隐私与安全性 → 开发者模式；开启后需重启并确认。")
+        self.detail.set(f"{device['model']} · iOS {device['ios']} · 电脑信任配对：{'已完成' if device['paired'] else '待完成'} · 开发者模式：{'已开启' if device['developer'] else '待开启'}\n设置 → 隐私与安全性 → 开发者模式；开启后需重启并确认。")
+        apps=device.get('controller_apps')
+        inventory=('手机上未发现控制组件；VPN 与设备管理没有对应开发者项是正常的，请先安装。' if apps==[] else '手机上检测到控制组件；是否可运行仍需连接验证。' if apps else '控制组件安装状态暂未读取到，请保持解锁后重新检测。')
+        self.detail.set(self.detail.get()+'\n'+inventory)
+        problem=dm.compatibility_error(device)
+        if problem:self.detail.set(self.detail.get()+'\n'+problem)
+        pending=dm.setup_status(device['udid'])
+        if hasattr(self,'verify_button'):self.verify_button.configure(state='normal' if pending and pending.get('can_verify') and not self.busy else 'disabled')
         record=dm.signing_record(device['udid']);state,remaining=dm.expiry_state(record,int(self.panel.cfg.get('signature_warn_hours',48)))
         self.signature.set('签名：尚未安装，请点击下方安装按钮。' if not record else
             f"签名：{'已到期' if state=='expired' else '即将到期' if state=='soon' else '有效'} · 到期 {record['expires_at'][:10]} · 团队 {record['team_id']}")
+        if pending and pending.get('status')!='ready':self.signature.set('配置阶段：'+pending.get('stage','未完成')+' · '+pending.get('message','请重新检测'))
         if record:
+            if hasattr(self,'verify_button') and not self.busy and state not in ('unknown','expired'):self.verify_button.configure(state='normal')
             team=record['team_id'];self.team.set(next((label for label,value in self.team_map.items() if value==team),team))
 
     def install(self):
@@ -139,11 +157,24 @@ class DeviceWindow:
         self.status.set('正在安装并验证控制组件；手机出现图标后仍需等待完成。')
         self.task(job)
 
+    def verify(self):
+        if self.busy:return
+        if self.panel.worker and self.panel.worker.is_alive():self.status.set('请先停止浏览，再验证控制组件。');return
+        device=self.selected()
+        if not device:self.status.set('请先连接并选择 USB iPhone。');return
+        def job():
+            record=dm.verify_provision(device,lambda message:self.events.put(('status',message)))
+            self.events.put(('installed',(device,record)))
+        self.last_result='';self.status.set('正在验证已安装组件，保留现有签名和安装。');self.task(job)
+
     def use_device(self):
         device=self.selected()
         if not device:
             self.status.set('未选择 USB iPhone，请连接手机并重新检测。');return
         if self.panel.worker and self.panel.worker.is_alive():self.status.set('请先停止当前浏览任务。');return
+        blocker=dm.setup_blocker(device['udid'])
+        if blocker:
+            self.status.set(blocker);self.last_result=blocker;return
         record=dm.signing_record(device['udid'])
         if dm.expiry_state(record)[0] in ('unknown','expired'):
             message='当前设备没有有效安装记录，无法开始浏览。请先点击“安装 / 重新签名控制组件”，等待显示签名有效；失败详情见 appium.log。'
@@ -152,7 +183,7 @@ class DeviceWindow:
         if not self.panel.save_settings(quiet=True):return
         callback=self.panel.__dict__.get('on_device_selected')
         if callback:
-            callback(device);self.status.set('设备已添加，可在总览独立开始。');return
+            callback(device);self.last_result='设备已添加，可在总览独立开始。';self.status.set(self.last_result);return
         self.panel.cfg.update(device_udid=device['udid'],device_name=device['name'],runtime_dir=str(dm.device_dir(device['udid'])))
         dm.write_json(self.panel.__dict__.get('config_path',DATA/'config.json'),self.panel.cfg)
         self.panel.device_label.set(device['name']+' · USB 实机控制 · 手动运行')
@@ -198,6 +229,8 @@ class DeviceWindow:
                     if not getattr(self,'last_result',''):self.status.set('检测完成。选择设备与签名团队后安装。')
                 elif event=='installed':
                     device,record=value
+                    for current in self.devices:
+                        if current['udid']==device['udid']:current['controller_apps']=[{'bundle':record.get('bundle_id','')}]
                     self.show_device();self.use_device()
                     if dm.expiry_state(record,self.panel.cfg.get('signature_warn_hours',48))[0]=='soon':
                         self.status.set('重新签名安装已完成，但有效期仍临近到期。请在 Xcode 更新证书或描述文件后重试。')
@@ -205,6 +238,7 @@ class DeviceWindow:
                     self.busy=False;self.progress.stop()
                     self.install_button.configure(state='normal');self.use_button.configure(state='normal')
                     self.device_box.configure(state='readonly');self.team_box.configure(state='normal')
+                    self.show_device()
                 elif event=='error':
                     self.last_result=value;self.status.set(value)
                 else:self.status.set(value)

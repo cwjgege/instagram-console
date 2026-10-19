@@ -3,7 +3,7 @@ const fs=require('fs'),path=require('path'),net=require('net');
 const {createRequire}=require('module');const {pathToFileURL}=require('url');
 const cfg=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 const req=createRequire(path.join(cfg.vendor,'node_modules/appium-xcuitest-driver/package.json'));
-const ios=req('appium-ios-device');let test,servers=[];
+const ios=req('appium-ios-device');let test,servers=[],launchLog,launchLogTimer;
 const write=(value)=>process.stdout.write(JSON.stringify(value)+'\n');
 async function probe(){
  const ids=await ios.utilities.getConnectedDevices();const result=[];
@@ -14,10 +14,28 @@ async function probe(){
   }catch(e){result.push({udid,paired:false,developer:false,error:String(e.message).slice(0,180)})}
  }write(result);
 }
+async function apps(){
+ if(!/^[a-fA-F0-9-]{10,50}$/.test(cfg.udid))throw Error('Invalid device identifier');
+ let service=await ios.services.startInstallationProxyService(cfg.udid);
+ try{const values=await service.lookupApplications({applicationType:'User',...(cfg.bundles?{bundleIds:cfg.bundles}:{}),returnAttributes:['CFBundleIdentifier','CFBundleDisplayName','CFBundleName','CFBundleShortVersionString']});
+  write(Object.entries(values).filter(([bundle])=>cfg.bundles?cfg.bundles.includes(bundle):/webdriver|igconsole|xctrunner/i.test(bundle)).map(([bundle,v])=>({bundle,name:v.CFBundleDisplayName||v.CFBundleName||bundle,version:v.CFBundleShortVersionString||''})))
+ }finally{service.close()}
+}
 async function forward(local,remote){
  const server=net.createServer(async socket=>{let device;socket.on('error',()=>{if(device)device.destroy()});
   try{device=await ios.utilities.connectPort(cfg.udid,remote);device.on('error',()=>socket.destroy());socket.pipe(device);device.pipe(socket);socket.on('close',()=>device.destroy());}catch(e){socket.destroy()}
  });servers.push(server);await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(local,'127.0.0.1',resolve)});
+}
+async function watchLaunchErrors(){
+ try{launchLog=await ios.services.startSyslogService(cfg.udid);
+  launchLog.start(value=>{const line=String(value);
+   if(!/WebDriverAgentRunner|testmanagerd/.test(line))return;
+   const signals=['Timed out while enabling automation mode','Developer App Certificate is not trusted','device is locked'];
+   const signal=signals.find(v=>line.toLowerCase().includes(v.toLowerCase()));
+   if(signal){write({startup_error:signal});stop(2)}
+  });
+  launchLogTimer=setTimeout(()=>{launchLog.close();launchLog=null},90000);launchLogTimer.unref();
+ }catch(e){write({phase:'startup_diagnostics_unavailable'})}
 }
 async function launch(){
  if(!/^[a-fA-F0-9-]{10,50}$/.test(cfg.udid))throw Error('Invalid device identifier');
@@ -25,6 +43,7 @@ async function launch(){
   const d=new RealDevice(cfg.udid,{});d.isAppInstalled=async()=>{let p=await ios.services.startInstallationProxyService(cfg.udid);try{return !!(await p.lookupApplications({bundleIds:[cfg.bundle]}))[cfg.bundle]}finally{p.close()}};
   await d.install(cfg.install,cfg.bundle,{timeoutMs:120000});write({phase:'installed'});
  }
+ await watchLaunchErrors();
  test=new ios.Xctest(cfg.udid,cfg.bundle,null,{env:{USE_PORT:'8100',MJPEG_SERVER_PORT:String(cfg.mjpeg_port),WDA_PRODUCT_BUNDLE_IDENTIFIER:cfg.bundle,DYLD_FRAMEWORK_PATH:'/Developer/Library/Frameworks:/Developer/Library/PrivateFrameworks',DYLD_LIBRARY_PATH:'/Developer/usr/lib'}});
  // Finish configuration close before closing AFC; otherwise its close callback times out.
  test._writeConfigurationToDevice=async function(configuration,file){const house=await ios.services.startHouseArrestService(cfg.udid);let afc;
@@ -32,6 +51,6 @@ async function launch(){
  };
  await test.start();await forward(cfg.wda_port,8100);write({phase:'forward_ready'});
 }
-function stop(){for(const s of servers)s.close();if(test)test.stop();process.exit(0)}
+function stop(code=0){if(launchLogTimer)clearTimeout(launchLogTimer);if(launchLog)launchLog.close();for(const s of servers)s.close();if(test)test.stop();process.exit(typeof code==='number'?code:0)}
 process.on('SIGTERM',stop);process.on('SIGINT',stop);
-(cfg.mode==='probe'?probe():launch()).catch(e=>{write({error:String(e.message).slice(0,1000)});if(test)test.stop();for(const s of servers)s.close();process.exit(1)});
+(cfg.mode==='probe'?probe():cfg.mode==='apps'?apps():launch()).catch(e=>{write({error:String(e.message).slice(0,1000)});stop(1)});

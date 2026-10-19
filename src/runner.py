@@ -13,6 +13,8 @@ import subprocess
 import threading
 import time
 import queue
+import re
+from setup_errors import SetupError,classify_setup_error,log_positions,attempt_text
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from urllib.request import Request, urlopen
@@ -49,7 +51,13 @@ def validate_motion(cfg):
 class TransportLost(RuntimeError):
     pass
 
+class ControlHTTPError(RuntimeError):
+    def __init__(self,message,status,kind='',empty=False):
+        super().__init__(message);self.status=status;self.kind=kind;self.empty=empty
+
 def transport_error(exc):
+    if isinstance(exc,ControlHTTPError):
+        if exc.status in (502,503,504) or (exc.status>=500 and exc.empty) or exc.kind=='invalid session id':return True
     text=str(exc).casefold()
     return isinstance(exc,(TimeoutError,ConnectionError)) or any(s in text for s in (
         'socket hang up','connection refused','connection reset','timed out','invalid session id',
@@ -75,10 +83,14 @@ def call(method, path, data=None, timeout=35, server=None):
         with urlopen(req, timeout=timeout) as r:
             value = json.load(r)['value']
     except HTTPError as e:
-        raw=e.read().decode(errors='replace')
-        try:message=json.loads(raw).get('value',{}).get('message',raw)
-        except (ValueError,AttributeError):message=raw
-        raise RuntimeError(message[:1200]) from e
+        raw=e.read().decode(errors='replace');kind='';message=''
+        try:
+            parsed=json.loads(raw).get('value',{})
+            if isinstance(parsed,dict):kind=str(parsed.get('error') or '');message=str(parsed.get('message') or '')
+        except (ValueError,AttributeError,TypeError):message=raw
+        if not raw.strip() and e.code==404 and path.startswith('/session/'):kind='invalid session id'
+        detail=message.strip() or kind or str(e.reason) or '控制服务未返回错误说明'
+        raise ControlHTTPError(f'HTTP {e.code}: '+detail[:1200],e.code,kind,not raw.strip()) from e
     if isinstance(value, dict) and value.get('error'):
         raise RuntimeError(str(value))
     return value
@@ -130,6 +142,7 @@ class Runner:
         self.search_attempts = 0
         self.navigation_epoch = 0
         self.reconnections = 0
+        self.reconnect_times = []
         self.in_interaction = False
         self.refresh_required = False
         self.last_tree = None
@@ -238,15 +251,19 @@ class Runner:
         except Exception:pass
 
     def wait_for_usb(self):
-        from device_manager import scan_devices
+        from device_manager import scan_devices,usb_serials,validate_device
         end=time.monotonic()+self.cfg['usb_wait_seconds']
         announced=False
         while True:
             self.check()
-            devices=scan_devices()
-            if any(d['udid']==self.cfg['device_udid'] for d in devices):
-                if announced:self.log('device_ready',message='指定 iPhone 已重新通过 USB 接入')
-                return
+            physical=usb_serials()
+            if self.cfg['device_udid'].replace('-','').lower() in physical:
+                devices=scan_devices()
+                device=next((d for d in devices if d['udid']==self.cfg['device_udid']),None)
+                if device:
+                    validate_device(device);self.device_info=device
+                    if announced:self.log('device_ready',message='指定 iPhone 已重新通过 USB 接入，电脑配对和开发者模式已检查')
+                    return
             if not announced:
                 self.log('device_wait',message='未检测到指定 iPhone 的 USB 连接，等待重新接入；请检查线缆并解锁手机',seconds=self.cfg['usb_wait_seconds'])
                 announced=True
@@ -264,6 +281,10 @@ class Runner:
             self.server_url=ensure_server(self.cfg['device_udid'],notify,self.stop)['url']
             self.device_env=child_env(prepare_vendor())
             record=signing_record(self.cfg['device_udid'])
+            if record and hasattr(self,'device_info'):
+                legacy=str(self.device_info['ios']).split('.')[0]=='16'
+                if legacy!=(record.get('controller')=='legacy16'):
+                    raise SetupError('controller_mismatch','手机系统与已配置的控制组件不匹配，请在此设备向导安装对应的 iOS 16 / 新版组件。','设备支持')
             if record and record.get('controller')=='legacy16':ensure_legacy(self.cfg['device_udid'],record,notify,self.stop)
         try:
             self.http('GET','/status',timeout=3)
@@ -285,7 +306,8 @@ class Runner:
                 raise RuntimeError('Appium 服务未能启动')
         state = self.runtime / 'active-session.json'
         if state.exists() and not force_new:
-            old = json.loads(state.read_text())
+            try:old=json.loads(state.read_text())
+            except (OSError,ValueError):old={};state.unlink(missing_ok=True)
             caps = old.get('capabilities',{})
             if caps.get('udid',caps.get('appium:udid')) == self.cfg['device_udid'] and (not self.managed or old.get('server_url')==self.server_url):
                 try:
@@ -306,6 +328,18 @@ class Runner:
                     state.unlink(missing_ok=True)
                     self.path = None
                     force_new=True
+        if force_new and state.exists():
+            try:cached=json.loads(state.read_text())
+            except (OSError,ValueError):cached={}
+            caps=cached.get('capabilities',{})
+            if cached and caps.get('udid',caps.get('appium:udid'))!=self.cfg['device_udid']:
+                raise RuntimeError('缓存设备标识不一致，未删除其他设备会话，请检查此设备配置。')
+            if cached and (not self.managed or cached.get('server_url')==self.server_url):
+                sid=cached.get('sessionId','')
+                if re.fullmatch('[A-Za-z0-9-]{1,80}',sid):
+                    try:self.http('DELETE','/session/'+sid,timeout=8)
+                    except Exception:pass
+            state.unlink(missing_ok=True);self.path=None
         payload = json.loads((self.runtime / 'session-request.json').read_text())
         payload['capabilities']['alwaysMatch']['appium:wdaConnectionTimeout']=20000
         payload['capabilities']['alwaysMatch']['appium:waitForIdleTimeout']=1
@@ -324,8 +358,23 @@ class Runner:
             caps.update({'appium:wdaLocalPort':ports['wda'],'appium:mjpegServerPort':ports['mjpeg'],'appium:wdaRemotePort':8100})
             if record and record.get('controller')=='legacy16':caps['appium:webDriverAgentUrl']=f"http://127.0.0.1:{ports['wda']}"
         self.log('connecting',message='正在建立手机控制会话，停止时需等待当前连接命令结束…')
-        value = self.http('POST','/session',payload,timeout=240)
-        if self.managed:value['server_url']=self.server_url
+        positions=log_positions(self.runtime)
+        try:value=self.http('POST','/session',payload,timeout=240)
+        except Exception as exc:
+            issue=classify_setup_error(exc,attempt_text(self.runtime,positions))
+            if issue.code not in ('unknown','connection'):
+                if self.managed:
+                    import device_manager as dm
+                    pending=bool(record and dm.stage_installed_candidate(getattr(self,'device_info',{'udid':self.cfg['device_udid'],'ios':self.cfg.get('device_ios','')}),record['team_id']))
+                    atomic_json(self.runtime/'setup-state.json',{'status':'awaiting_trust' if pending and issue.code=='developer_untrusted' else 'awaiting_validation' if pending else 'failed','can_verify':pending,'code':issue.code,'stage':issue.stage,'message':str(issue)})
+                raise issue from exc
+            if transport_error(exc):raise TransportLost('建立手机控制会话时连接中断') from exc
+            raise
+
+        if self.managed:
+            value['server_url']=self.server_url
+            atomic_json(self.runtime/'setup-state.json',{'status':'ready','message':'控制组件已连接验证。'})
+            (self.runtime/'pending-setup.json').unlink(missing_ok=True)
         atomic_json(state,value)
         self.path = '/session/' + value['sessionId']
         self.check()
@@ -337,8 +386,9 @@ class Runner:
             raise RuntimeError('互动过程中连接中断，结果未确认，已停止且不会重发')
         if not self.cfg['reconnect_enabled']:
             raise RuntimeError('控制连接中断，自动重连已关闭')
-        while self.reconnections<self.cfg['reconnect_limit']:
-            self.reconnections+=1
+        now=time.monotonic();self.reconnect_times=[t for t in self.reconnect_times if now-t<300]
+        while len(self.reconnect_times)<self.cfg['reconnect_limit']:
+            self.reconnections+=1;self.reconnect_times.append(time.monotonic())
             self.log('reconnecting',message='正在重新建立手机控制连接',reconnections=self.reconnections)
             self.wait(2)
             try:
@@ -350,7 +400,7 @@ class Runner:
                 raise
             self.log('reconnected',message='连接已恢复，重新识别视频后继续')
             return
-        raise RuntimeError('控制连接恢复失败，本轮重连次数已用完')
+        raise RuntimeError('控制连接恢复失败，5 分钟内重连次数已用完；请检查 USB 稳定性后重新开始')
 
     def reels(self, initial_tree=None):
         # A caller may pass the tree it just verified, with no intervening action.
@@ -519,8 +569,8 @@ class Runner:
         if self.daily['likes']>=self.cfg['max_likes_per_day']:return
         if self.daily['posts'].get(post['key'],{}).get('likes'):return
         self.in_interaction=True
-        try:self.toggle_on(post,'likes','like-button',{'like','like post'})
-        finally:self.in_interaction=False
+        self.toggle_on(post,'likes','like-button',{'like','like post'})
+        self.in_interaction=False
         # Advance even when the visible button was already active or unavailable.
         # An uncertain write raises above and is never retried here.
         self.like_next=len(self.like_seen)+self.rng.randint(self.cfg['like_interval_min'],self.cfg['like_interval_max'])
@@ -1017,7 +1067,7 @@ class Runner:
         except Exception as e:
             self.diagnose('fatal',e)
             status='error'
-            message='手机控制连接中断，当前动作结果未确认，已停止且不会重发' if transport_error(e) else str(e)
+            message='手机控制连接中断，当前动作结果未确认，已停止且不会重发' if transport_error(e) else (str(e) or type(e).__name__)
             self.log('error',message=message,detail=str(e)[:1800])
         finally:
             if self.managed and self.path:

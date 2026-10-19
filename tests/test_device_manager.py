@@ -10,7 +10,7 @@ class DeviceSetup(unittest.TestCase):
   self.tmp=tempfile.TemporaryDirectory(dir='work');self.data=Path(self.tmp.name).resolve()
   self.scope=patch.object(dm,'DATA',self.data);self.scope.start()
   self.env=patch.dict('os.environ',{'IG_CONSOLE_LOCK_DIR':str(self.data/'locks')});self.env.start()
-  self.device=dict(udid='00008030-0000000000000000',identifier='core-id',name='Test iPhone',paired=True,developer=True)
+  self.device=dict(udid='00008030-0000000000000000',identifier='core-id',name='Test iPhone',ios='18.1',paired=True,developer=True)
  def tearDown(self):self.env.stop();self.scope.stop();self.tmp.cleanup()
  def test_only_wired_iphones_are_selectable(self):
   def row(kind,transport):return {'identifier':'one','hardwareProperties':{'deviceType':kind,'udid':self.device['udid']},'connectionProperties':{'transportType':transport,'pairingState':'paired'},'deviceProperties':{'name':'Test','developerModeStatus':'enabled'}}

@@ -123,6 +123,8 @@ class Fleet:
         online=self.online.get(udid);ready=bool(online and online.get('paired') and online.get('developer'))
         detail=self.errors.get(udid) or cfg.get('_load_error') or (p.status.get() if p else '')
         signature,_=dm.expiry_state(record)
+        setup=dm.setup_status(udid) if len(udid)>=10 else None
+        if setup and setup.get('status')!='ready':detail=setup.get('message') or detail
         if udid in self.__dict__.get('pending_starts',{}) or self.__dict__.get('pending_all') is not None:state,tag='等待连接检测','pending'
         elif self.scanning and not online:state,tag='检测连接中','pending'
         elif stopping:state,tag='正在停止','pending'
@@ -134,6 +136,7 @@ class Fleet:
         elif self.errors.get(udid) or cfg.get('_load_error') or (detail.startswith('已停止：')):state,tag='需要处理','error'
         elif not online:state,tag='设备未连接','pending'
         elif not ready:state,tag='检查连接','pending'
+        elif setup and setup.get('status')!='ready':state,tag='等待手机信任' if setup.get('status')=='awaiting_trust' else '配置未完成','pending'
         elif signature in ('unknown','expired'):state,tag='待配置' if signature=='unknown' else '签名已到期','pending'
         elif signature=='soon':state,tag='签名即将到期','pending'
         else:state,tag='已就绪','idle'

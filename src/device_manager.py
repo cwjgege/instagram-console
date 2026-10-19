@@ -18,6 +18,7 @@ from datetime import datetime,timezone
 from pathlib import Path
 from urllib.request import Request,urlopen
 from app_paths import ASSETS,DATA,FROZEN,PORT,SERVER,VERSION,lock_device
+from setup_errors import SetupError,classify_setup_error,log_positions,attempt_text
 
 SERVER_PROCESS=None
 SERVER_PID=None
@@ -39,7 +40,7 @@ def xcode_directory():
 def child_env(vendor=None):
     env=os.environ.copy()
     env['DEVELOPER_DIR']=str(xcode_directory())
-    env['PATH']=(str(vendor/'bin')+':' if vendor else '')+'/usr/bin:/bin:/usr/sbin:/sbin'
+    env['PATH']=(str(vendor/'bin')+':' if vendor else '')+str(xcode_directory()/'usr/bin')+':/usr/bin:/bin:/usr/sbin:/sbin'
     for key in ['PYTHONHOME','PYTHONPATH','__PYVENV_LAUNCHER__','DYLD_LIBRARY_PATH','DYLD_FRAMEWORK_PATH']:
         original=env.pop(key+'_ORIG',None);env.pop(key,None)
         if original:env[key]=original
@@ -168,6 +169,7 @@ def usb_serials():
 
 def scan_devices():
     physical=usb_serials()
+    if not physical:return []
     try:modern=wired_iphones(coredevice(['list','devices']))
     except RuntimeError:modern=[]
     modern=[d for d in modern if d['udid'].replace('-','').lower() in physical]
@@ -258,9 +260,77 @@ def expiry_state(record,hours=48,now=None):
     except (KeyError,TypeError,ValueError):return 'unknown',None
     return ('expired' if remaining<=0 else 'soon' if remaining<=hours else 'valid'),remaining
 
+def compatibility_error(device):
+    try:major=int(str(device.get('ios','')).split('.')[0])
+    except ValueError:return '尚未读取到手机系统版本，请解锁后重新检测 USB 连接。'
+    return '当前版本支持 iOS 16 及以上；这台手机的系统版本暂不支持。' if major<16 else None
+
+
+def validate_device(device):
+    if compatibility_error(device):raise SetupError('unsupported_ios',compatibility_error(device),'设备支持')
+    if not device.get('paired'):raise SetupError('pairing','手机尚未信任此电脑。请在 Finder 中选择手机并完成双方的信任提示；这不同于 VPN 与设备管理里的开发者 App 信任。','设备准备')
+    if not device.get('developer'):raise SetupError('developer_mode','请开启手机开发者模式，重启并确认开启后再安装。','设备准备')
+
+
+def controller_apps(udid,bundles=None):
+    device_dir(udid);vendor=prepare_vendor();DATA.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=DATA,prefix='controller-probe-') as folder:
+        file=Path(folder)/'request.json';write_json(file,{'vendor':str(vendor),'mode':'apps','udid':udid,'bundles':bundles})
+        value=subprocess.run([str(vendor/'bin/node'),str(ASSETS/'resources/ios_device.cjs'),str(file)],env=child_env(vendor),capture_output=True,text=True,timeout=15)
+        if value.returncode:raise RuntimeError('无法读取手机上的控制组件，请保持 USB 连接并解锁。')
+        for line in reversed(value.stdout.splitlines()):
+            try:
+                result=json.loads(line)
+                if isinstance(result,list):return result
+            except ValueError:pass
+        raise RuntimeError('手机没有返回控制组件安装信息。')
+
+
+def setup_status(udid):
+    if not udid:return None
+    try:
+        value=json.loads((device_dir(udid)/'setup-state.json').read_text())
+        return value if isinstance(value,dict) else None
+    except (OSError,ValueError):return None
+
+
+def setup_blocker(udid):
+    state=setup_status(udid)
+    return state.get('message') if state and state.get('status')!='ready' else None
+
+
+def stage_installed_candidate(device,team):
+    """A signed build becomes resumable only when that bundle exists on this phone."""
+    runtime=device_dir(device['udid']);legacy=str(device.get('ios','')).split('.')[0]=='16'
+    derived=runtime/('LegacyDerivedData' if legacy else 'DerivedData')
+    try:
+        record=profile_record(derived/'Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app',device['udid'],team)
+        record['controller']='legacy16' if legacy else 'modern'
+        if expiry_state(record)[0] in ('unknown','expired'):return False
+        if not controller_apps(device['udid'],[record['bundle_id']]):return False
+        write_json(runtime/'pending-setup.json',{'team_id':team,'record':record});return True
+    except (OSError,ValueError,RuntimeError,subprocess.SubprocessError):return False
+
+
+def setup_attempt(device,team,job):
+    runtime=device_dir(device['udid']);runtime.mkdir(parents=True,exist_ok=True);positions=log_positions(runtime)
+    try:return job()
+    except Exception as exc:
+        issue=classify_setup_error(exc,attempt_text(runtime,positions))
+        state={'status':'failed','code':issue.code,'stage':issue.stage,'message':str(issue),'updated_at':datetime.now(timezone.utc).isoformat()}
+        if issue.code in ('developer_untrusted','signature_or_trust','locked','automation_timeout','connection','unknown'):
+            if stage_installed_candidate(device,team):state['status']='awaiting_trust' if issue.code=='developer_untrusted' else 'awaiting_validation'
+        try:pending=json.loads((runtime/'pending-setup.json').read_text());state['can_verify']=pending.get('team_id')==team
+        except (OSError,ValueError,AttributeError):state['can_verify']=False
+        write_json(runtime/'setup-state.json',state)
+        if issue is exc:raise
+        raise issue from exc
+
+
 def provision(device,team,notify=lambda message:None):
     """Build/sign/install WDA for the selected USB phone. Never opens Instagram."""
-    with lock_device(device['udid']):return _provision(device,team,notify)
+    with lock_device(device['udid']):return setup_attempt(device,team,lambda:_provision(device,team,notify))
+
 
 def _provision(device,team,notify):
     runtime=device_dir(device['udid']);runtime.mkdir(parents=True,exist_ok=True)
@@ -269,8 +339,7 @@ def _provision(device,team,notify):
         except BlockingIOError:raise RuntimeError('请先停止这台手机的浏览任务，再重新签名。')
         fresh=next((d for d in scan_devices() if d['udid']==device['udid']),None)
         if not fresh:raise RuntimeError('所选 iPhone 未通过 USB 连接，请重新检测。')
-        if not fresh['paired']:raise RuntimeError('请先在手机上信任此电脑，再重新检测。')
-        if not fresh['developer']:raise RuntimeError('请开启手机开发者模式，重启并确认开启后再安装。')
+        validate_device(fresh)
         check_xcode()
         previous=signing_record(device['udid'])
         from runtime_manager import ensure_server as ensure_device_server,build_legacy,ensure_legacy
@@ -294,10 +363,8 @@ def _provision(device,team,notify):
             payload['capabilities']['alwaysMatch']['appium:webDriverAgentUrl']=url
         build=json.loads(json.dumps(payload));caps=build['capabilities']['alwaysMatch']
         caps['appium:usePrebuiltWDA']=False;caps['appium:useNewWDA']=False
-        notify('正在编译、签名并验证控制组件，不主动卸载旧控件。请保持手机解锁；若提示开发者未受信任，请在手机完成信任后重试。')
-        try:value=call('POST','/session',build,timeout=360)
-        except Exception as exc:
-            raise RuntimeError('控制组件未完成安装或启动，不能开始浏览。详细 Xcode 错误已记录在 appium.log；请通过当前聊天发送日志以定位原因。') from exc
+        notify('iOS 16 组件已安装，正在验证控制接口；安装图标不代表验证完成。' if legacy else '正在编译、签名并验证控制组件，不主动卸载旧控件。请保持手机解锁；若提示开发者未受信任，请在手机完成信任后重试。')
+        value=call('POST','/session',build,timeout=360)
         value['server_url']=endpoint['url'];write_json(old,value)
         if not legacy:
             app=runtime/'DerivedData/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app'
@@ -307,13 +374,65 @@ def _provision(device,team,notify):
         if state=='expired':raise RuntimeError('签名已到期，请检查 Xcode 证书后重试。')
         write_json(runtime/'session-request.json',payload)
         write_json(runtime/'signing.json',record)
+        write_json(runtime/'setup-state.json',{'status':'ready','message':'控制组件已连接验证。','updated_at':datetime.now(timezone.utc).isoformat()})
+        (runtime/'pending-setup.json').unlink(missing_ok=True)
         notify('控制组件已安装并连接，签名有效期已读取。')
         return record
+
+def verify_provision(device,notify=lambda message:None):
+    runtime=device_dir(device['udid'])
+    try:pending=json.loads((runtime/'pending-setup.json').read_text());team=pending['team_id']
+    except (OSError,ValueError,KeyError,TypeError):
+        record=signing_record(device['udid'])
+        if not record or expiry_state(record)[0] in ('unknown','expired'):
+            raise SetupError('not_installed','没有可重新验证的安装记录，请先安装控制组件。','安装')
+        pending={'team_id':record['team_id'],'record':record};team=record['team_id']
+    def job():
+        with (runtime/'runner.lock').open('a') as guard:
+            try:fcntl.flock(guard,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError('请先停止这台手机的浏览任务，再验证控制组件。')
+            fresh=next((d for d in scan_devices() if d['udid']==device['udid']),None)
+            if not fresh:raise SetupError('connection','所选 iPhone 未通过 USB 连接，请重新检测。','连接')
+            validate_device(fresh);record=pending['record'];legacy=record.get('controller')=='legacy16'
+            derived=runtime/('LegacyDerivedData' if legacy else 'DerivedData')
+            try:current=profile_record(derived/'Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app',device['udid'],team)
+            except FileNotFoundError:raise SetupError('missing_build','本机缺少此组件的编译产物，无法直接验证。请在这台 Mac 上安装或重新签名一次。','安装') from None
+            current['controller']=record.get('controller','modern')
+            if expiry_state(current)[0] in ('unknown','expired'):raise SetupError('signature_invalid','签名已到期，请重新签名安装。','签名')
+            if current['bundle_id']!=record['bundle_id']:raise RuntimeError('待验证组件已经改变，请重新安装。')
+            if not controller_apps(device['udid'],[current['bundle_id']]):raise SetupError('not_installed','手机上未找到本次控制组件，因此不会出现对应开发者信任项。请先安装控制组件。','安装')
+            from runtime_manager import ensure_server,ensure_legacy
+            from runner import call
+            endpoint=ensure_server(device['udid'],notify)
+            old=runtime/'active-session.json'
+            if old.exists():
+                try:cached=json.loads(old.read_text())
+                except (OSError,ValueError):cached={}
+                caps=cached.get('capabilities',{})
+                if cached and caps.get('udid',caps.get('appium:udid'))!=device['udid']:
+                    raise RuntimeError('缓存设备标识不一致，未删除其他设备会话。')
+                sid=cached.get('sessionId','')
+                if cached.get('server_url')==endpoint['url'] and re.fullmatch('[A-Za-z0-9-]{1,80}',sid):
+                    try:call('DELETE','/session/'+sid,timeout=8,server=endpoint['url'])
+                    except Exception:pass
+                old.unlink(missing_ok=True)
+            payload=make_payload(fresh,team);caps=payload['capabilities']['alwaysMatch']
+            caps['appium:updatedWDABundleId']=current['bundle_id'].removesuffix('.xctrunner');caps['appium:derivedDataPath']=str(derived)
+            if legacy:caps['appium:webDriverAgentUrl']=ensure_legacy(device['udid'],current,notify)
+            notify('正在复用已编译组件验证连接，不主动卸载组件或重建签名。')
+            value=call('POST','/session',payload,timeout=240,server=endpoint['url']);value['server_url']=endpoint['url']
+            write_json(runtime/'active-session.json',value);write_json(runtime/'session-request.json',payload);write_json(runtime/'signing.json',current)
+            write_json(runtime/'setup-state.json',{'status':'ready','message':'控制组件已连接验证。','updated_at':datetime.now(timezone.utc).isoformat()})
+            (runtime/'pending-setup.json').unlink(missing_ok=True);return current
+    with lock_device(device['udid']):return setup_attempt(device,team,job)
+
 
 def signing_record(udid):
     if not udid:return None
     path=device_dir(udid)/'signing.json'
-    try:return json.loads(path.read_text())
+    try:
+        value=json.loads(path.read_text())
+        return value if isinstance(value,dict) else None
     except (OSError,ValueError):return None
 
 def close_other_sessions(keep=None):

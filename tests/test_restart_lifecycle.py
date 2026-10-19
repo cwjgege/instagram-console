@@ -79,8 +79,9 @@ class SessionLifecycle(unittest.TestCase):
    self.assertFalse(call.call_args.args[2]['capabilities']['alwaysMatch']['appium:useNewWDA'])
  def test_forced_reconnect_does_not_uninstall_phone_component(self):
   (self.base/'session-request.json').write_text(json.dumps({'capabilities':{'alwaysMatch':{'appium:udid':'A'*20,'appium:useNewWDA':True}}}))
-  with patch('runner.call',side_effect=[{},dict(sessionId='new',capabilities={'udid':'A'*20})]) as call:
+  with patch('runner.call',side_effect=[{},None,dict(sessionId='new',capabilities={'udid':'A'*20})]) as call:
    self.r.connect(force_new=True)
+   self.assertEqual(call.call_args_list[1].args[:2],('DELETE','/session/old'))
    self.assertFalse(call.call_args.args[2]['capabilities']['alwaysMatch']['appium:useNewWDA'])
  def test_finished_event_is_emitted_after_both_locks_released(self):
   self.r.connect=Mock();self.r.reels=Mock();observed=[]
