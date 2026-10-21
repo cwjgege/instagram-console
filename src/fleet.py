@@ -6,6 +6,7 @@ from tkinter import ttk
 from app_paths import DATA,load_config
 import device_manager as dm
 import ui_theme as ui
+import connections
 
 class DeviceStore:
     def __init__(self,root=None,template=None):
@@ -46,21 +47,23 @@ class Fleet:
         self.cfg=copy.deepcopy(self.store.template);self.cfg['device_udid']='';self.worker=None
         self.on_device_selected=self.selected_device_ready;self.signature_notices=set()
         self.pending_starts={};self.pending_all=None;self.last_refresh=None;self._view_cache={}
+        self.next_network_check=time.monotonic()+15
         ui.apply(root);root.title('Instagram 控制台 · 设备工作区')
         root.geometry(f'{min(1260,root.winfo_screenwidth()-60)}x{min(780,root.winfo_screenheight()-100)}');root.minsize(1000,640)
         body=ttk.Frame(root,padding=24,style='Workspace.TFrame');body.pack(fill='both',expand=True)
         header=ttk.Frame(body,style='Workspace.TFrame');header.pack(fill='x',pady=(0,18))
         title=ttk.Frame(header,style='Workspace.TFrame');title.pack(side='left')
         ttk.Label(title,text='设备工作区',font=('PingFang SC',22,'bold'),background=ui.BG,foreground=ui.INK).pack(anchor='w')
-        self.summary=tk.StringVar(value='正在检测 USB 连接…')
+        self.summary=tk.StringVar(value='正在检测设备连接…')
         ttk.Label(title,textvariable=self.summary,style='Workspace.TLabel').pack(anchor='w',pady=(5,0))
         self.add_button=ttk.Button(header,text='添加设备',command=self.open_devices);self.add_button.pack(side='right',anchor='n')
+        self.add_network_button=ttk.Button(header,text='添加无线设备',command=self.add_network);self.add_network_button.pack(side='right',padx=8,anchor='n')
         workspace=ttk.Frame(body,style='Workspace.TFrame');workspace.pack(fill='both',expand=True)
         from preview import PreviewPane
         self.preview=PreviewPane(workspace);self.preview.frame.pack(side='right',fill='y',padx=(16,0))
         sheet=ttk.Frame(workspace,padding=18);sheet.pack(side='left',fill='both',expand=True)
         toolbar=ttk.Frame(sheet);toolbar.pack(fill='x',pady=(0,14))
-        ttk.Label(toolbar,text='USB 设备',style='Section.TLabel').pack(side='left')
+        ttk.Label(toolbar,text='已配置设备',style='Section.TLabel').pack(side='left')
         self.refresh_button=ttk.Button(toolbar,text='刷新连接',command=self.refresh);self.refresh_button.pack(side='left',padx=12)
         self.stop_all_button=ttk.Button(toolbar,text='全部停止',command=self.stop_all);self.stop_all_button.pack(side='right')
         self.start_all_button=ttk.Button(toolbar,text='全部开始',command=self.start_all,style='Primary.TButton');self.start_all_button.pack(side='right',padx=(0,8))
@@ -86,14 +89,19 @@ class Fleet:
         actions=ttk.Frame(detail);actions.pack(fill='x')
         self.start_selected_button=ttk.Button(actions,text='开始此设备',command=self.start_selected,style='Primary.TButton');self.start_selected_button.pack(side='left')
         self.stop_selected_button=ttk.Button(actions,text='停止此设备',command=self.stop_selected);self.stop_selected_button.pack(side='left',padx=8)
+        handoff=ttk.Frame(detail);handoff.pack(fill='x',pady=(8,0))
+        self.pause_selected_button=ttk.Button(handoff,text='暂停托管',command=lambda:self.hosting_action('pause_hosting'));self.pause_selected_button.pack(side='left')
+        self.resume_selected_button=ttk.Button(handoff,text='继续托管',command=lambda:self.hosting_action('resume_hosting'));self.resume_selected_button.pack(side='left',padx=8)
         self.config_button=ttk.Button(actions,text='配置与日志',command=self.open_selected);self.config_button.pack(side='left')
         self.setup_button=ttk.Button(actions,text='连接与签名',command=self.setup_selected);self.setup_button.pack(side='right')
+        self.connection_button=ttk.Button(actions,text='连接方式',command=self.open_connection);self.connection_button.pack(side='left',padx=8)
         footer=ttk.Frame(body,style='Workspace.TFrame');footer.pack(side='bottom',fill='x',pady=(12,0),before=workspace)
         self.status=tk.StringVar(value='连接检测通常需要几秒，期间可以安排开始。')
         self.status_label=ttk.Label(footer,textvariable=self.status,wraplength=850,style='Workspace.TLabel');self.status_label.pack(fill='x')
         ttk.Label(footer,text='⌘ Return 全部开始    Esc 全部停止    双击设备打开配置',style='Workspace.TLabel',font=('PingFang SC',10)).pack(anchor='w',pady=(6,0))
         self.device_label=tk.StringVar();root.protocol('WM_DELETE_WINDOW',self.close);root.createcommand('tk::mac::Quit',self.close)
         root.bind('<Escape>',lambda _:self.stop_all());root.bind('<Command-Return>',lambda _:self.start_all())
+        root.bind('<Command-k>',lambda _:self.add_network())
         root.bind('<Configure>',lambda event:self.resize(event),add='+')
         root.bind('<Destroy>',lambda e:self.preview.close() if e.widget==root else None,add='+')
         self.update_detail();root.after(100,self.refresh);root.after(200,self.poll)
@@ -112,19 +120,33 @@ class Fleet:
         self.device_window=DeviceWindow(self)
     def refresh(self):
         if self.scanning or self.closing:return
-        self.scanning=True;self.refresh_button.configure(state='disabled',text='正在检测…');self.scan_progress.pack(fill='x',pady=(0,8),before=self.table_area);self.scan_progress.start(15);self.status.set('正在检测 USB 连接，可安排检测完成后开始。');self.redraw()
+        self.scanning=True;self.refresh_button.configure(state='disabled',text='正在检测…');self.scan_progress.pack(fill='x',pady=(0,8),before=self.table_area);self.scan_progress.start(15);self.status.set('正在检测设备连接，可安排检测完成后开始。');self.redraw()
         def scan():
-            try:self.events.put(('devices',dm.scan_devices()))
+            try:self.events.put(('devices',connections.fleet_devices(self.store.profiles())))
             except Exception as exc:self.events.put(('error',str(exc)))
         threading.Thread(target=scan,daemon=True).start()
+    def refresh_remote_health(self):
+        if self.closing or self.scanning or self.__dict__.get('network_scanning'):return
+        self.network_scanning=True
+        profiles=self.store.profiles();started=time.time()
+        def check():
+            try:self.events.put(('remote_devices',(started,connections.probe_remotes(profiles))))
+            except Exception:self.events.put(('remote_devices',(started,[])))
+        threading.Thread(target=check,daemon=True).start()
     def device_view(self,cfg):
         udid=cfg['device_udid'];p=self.panels.get(udid);record=dm.signing_record(udid)
         alive=bool(p and p.worker and p.worker.is_alive());stopping=bool(alive and p.stop_event.is_set())
         online=self.online.get(udid);ready=bool(online and online.get('paired') and online.get('developer'))
         detail=self.errors.get(udid) or cfg.get('_load_error') or (p.status.get() if p else '')
         signature,_=dm.expiry_state(record)
+        connection_error=''
+        try:mode=connections.load(udid)['mode'] if len(udid)>=10 else 'usb'
+        except ValueError as exc:mode='usb';connection_error=str(exc);ready=False;detail=connection_error
+        if mode=='remote':signature='external'
+        if online and online.get('connection_error'):
+            connection_error=online['connection_error'];detail='控制连接检查失败：'+connection_error+'\n实时预览与控制端口分别检测；有画面不代表控制接口已就绪。'
         setup=dm.setup_status(udid) if len(udid)>=10 else None
-        if setup and setup.get('status')!='ready':detail=setup.get('message') or detail
+        if mode!='remote' and setup and setup.get('status')!='ready':detail=setup.get('message') or detail
         if udid in self.__dict__.get('pending_starts',{}) or self.__dict__.get('pending_all') is not None:state,tag='等待连接检测','pending'
         elif self.scanning and not online:state,tag='检测连接中','pending'
         elif stopping:state,tag='正在停止','pending'
@@ -133,18 +155,21 @@ class Fleet:
             if not search.get('enabled',True) and search.get('reason'):
                 state,tag='浏览中 · 搜索暂停','pending';detail+='\n搜索已暂停：'+search['reason']
             else:state,tag='运行中','running'
+            pause_state=getattr(getattr(p,'runner',None),'pause_state','running')
+            if pause_state in ('pausing','paused','resuming'):state,tag={'pausing':'正在暂停托管','paused':'已暂停托管','resuming':'重新识别页面中'}[pause_state],'pending'
+        elif connection_error:state,tag='控制连接异常' if online else '连接配置异常','error'
         elif self.errors.get(udid) or cfg.get('_load_error') or (detail.startswith('已停止：')):state,tag='需要处理','error'
         elif not online:state,tag='设备未连接','pending'
         elif not ready:state,tag='检查连接','pending'
-        elif setup and setup.get('status')!='ready':state,tag='等待手机信任' if setup.get('status')=='awaiting_trust' else '配置未完成','pending'
+        elif mode!='remote' and setup and setup.get('status')!='ready':state,tag='等待手机信任' if setup.get('status')=='awaiting_trust' else '配置未完成','pending'
         elif signature in ('unknown','expired'):state,tag='待配置' if signature=='unknown' else '签名已到期','pending'
         elif signature=='soon':state,tag='签名即将到期','pending'
         else:state,tag='已就绪','idle'
         if not detail:
             detail=('检测完成后将自动开始。' if self.scanning else '请连接这台手机并刷新连接。') if not online else ('请打开“连接与签名”完成解锁、信任或签名配置。' if tag=='pending' else '可以开始浏览，或打开配置调整此设备的设置。')
-        if self.scanning and not online:detail='已安排开始，连接检测完成后自动执行。' if self.pending_all is not None or udid in self.pending_starts else '正在检测此设备的 USB 连接，请稍候。'
+        if self.scanning and not online:detail='已安排开始，连接检测完成后自动执行。' if self.pending_all is not None or udid in self.pending_starts else '正在检测此设备的连接，请稍候。'
         if not alive and not online and not self.scanning:detail='请连接这台手机并刷新连接。'+(' '+detail if self.errors.get(udid) else '')
-        return dict(state=state,tag=tag,detail=detail,alive=alive,stopping=stopping,ready=ready,signature=signature,panel=p)
+        return dict(mode=mode,state=state,tag=tag,detail=detail,alive=alive,stopping=stopping,ready=ready,signature=signature,panel=p)
     def redraw(self):
         profiles=self.store.profiles();self._view_cache={c['device_udid']:(c,self.device_view(c)) for c in profiles};ids=set(self._view_cache)
         for udid in self.table.get_children():
@@ -153,7 +178,7 @@ class Fleet:
         for udid,(cfg,v) in self._view_cache.items():
             p=v['panel'];running+=v['alive'];attention+=v['tag'] in ('error','pending')
             stats=f'翻页 {p.runner.swipes}   ·   搜索 {p.runner.searches}' if p and hasattr(p,'runner') else '尚未运行'
-            values=(cfg.get('device_name','iPhone'),'iOS '+cfg.get('device_ios','未知'),'USB 就绪' if v['ready'] else '检测中' if self.scanning and udid not in self.online else '待检查' if udid in self.online else '离线',v['state'],stats)
+            values=(cfg.get('device_name','iPhone'),'iOS '+cfg.get('device_ios','未知'),{'usb':'USB','wifi':'Wi-Fi','remote':'网络 WDA'}[v['mode']] if v['ready'] else '检测中' if self.scanning and udid not in self.online else '待检查' if udid in self.online else '离线',v['state'],stats)
             if self.table.exists(udid):
                 if tuple(self.table.item(udid,'values'))!=values:self.table.item(udid,values=values,tags=(v['tag'],))
             else:self.table.insert('', 'end',iid=udid,values=values,tags=(v['tag'],))
@@ -163,7 +188,7 @@ class Fleet:
             if not self.table.selection():self.table.selection_set(profiles[0]['device_udid'])
         else:
             self.detail_frame.pack_forget();self.table.pack_forget();self.empty.pack(fill='both',expand=True)
-        self.summary.set(f'正在检测连接   ·   已保存 {len(profiles)} 台设备' if self.scanning else f'{len(profiles)} 台设备   ·   {running} 台运行中   ·   {attention} 台需处理' if profiles else '通过 USB 连接手机，分别配置与运行')
+        self.summary.set(f'正在检测连接   ·   已保存 {len(profiles)} 台设备' if self.scanning else f'{len(profiles)} 台设备   ·   {running} 台运行中   ·   {attention} 台需处理' if profiles else '首次安装使用 USB；已配置手机可选择无线连接')
         self.start_all_button.configure(state='disabled' if self.closing or not profiles else 'normal',text='检测后全部开始' if self.scanning else '全部开始')
         waiting=bool(self.pending_starts) or self.pending_all is not None
         self.stop_all_button.configure(state='normal' if running or waiting else 'disabled')
@@ -171,18 +196,37 @@ class Fleet:
     def update_detail(self):
         selected=self.table.selection();udid=selected[0] if selected else None
         item=self._view_cache.get(udid)
+        pause_state=getattr(getattr(item[1]['panel'],'runner',None),'pause_state','running') if item else 'running'
+        active=bool(item and item[1]['alive'] and not item[1]['stopping'])
+        self.pause_selected_button.configure(state='normal' if active and pause_state=='running' else 'disabled')
+        self.resume_selected_button.configure(state='normal' if active and pause_state=='paused' else 'disabled')
         if self.__dict__.get('preview'):self.preview.select(udid,item[0].get('device_name','iPhone') if item else '手机画面')
         if not item:
             self.detail_title.set('尚未选择设备');self.detail_meta.set('');self.detail_status.set('请选择要操作的设备。')
-            for button in (self.start_selected_button,self.stop_selected_button,self.config_button,self.setup_button):button.configure(state='disabled')
+            for button in (self.start_selected_button,self.stop_selected_button,self.config_button,self.setup_button,self.connection_button):button.configure(state='disabled')
             return
+        self.connection_button.configure(state='disabled' if self.closing or item[1]['alive'] else 'normal')
         cfg,v=item;self.detail_title.set(cfg.get('device_name','iPhone'))
-        self.detail_meta.set('iOS '+cfg.get('device_ios','未知')+'   ·   '+('USB 已就绪' if v['ready'] else 'USB 检测中' if self.scanning else 'USB 未就绪')+'   ·   '+{'valid':'签名有效','soon':'签名即将到期','expired':'签名已到期','unknown':'尚未完成签名'}[v['signature']])
+        self.detail_meta.set('iOS '+cfg.get('device_ios','未知')+'   ·   '+(connections.MODES[v['mode']]+' 已就绪' if v['ready'] else '连接检测中' if self.scanning else connections.MODES[v['mode']]+' 未就绪')+'   ·   '+{'valid':'签名有效','soon':'签名即将到期','expired':'签名已到期','unknown':'尚未完成签名','external':'远端签名需当地维护'}[v['signature']])
         self.detail_status.set(v['detail']);self.detail_label.configure(foreground=ui.RED if v['tag']=='error' else ui.INK)
-        can_start=not self.closing and (self.scanning or (v['ready'] and v['signature'] in ('valid','soon'))) and (not v['alive'] or v['stopping']) and not cfg.get('_load_error')
+        can_start=not self.closing and (self.scanning or (v['ready'] and v['signature'] in ('valid','soon','external'))) and (not v['alive'] or v['stopping']) and not cfg.get('_load_error')
         self.start_selected_button.configure(state='normal' if can_start else 'disabled',text='停止后重启' if v['stopping'] else '检测后开始' if self.scanning else '开始此设备')
         self.stop_selected_button.configure(state='normal' if v['alive'] or udid in self.pending_starts else 'disabled')
         self.config_button.configure(state='disabled' if self.closing else 'normal');self.setup_button.configure(state='disabled' if self.closing or v['alive'] else 'normal')
+    def add_network(self):
+        if self.closing:return
+        from connection_ui import ConnectionWindow
+        try:ConnectionWindow(self)
+        except Exception as exc:self.status.set('无法打开连接配置：'+str(exc))
+
+    def open_connection(self):
+        if self.closing:return
+        udid=self.selected()
+        if udid:
+            from connection_ui import ConnectionWindow
+            try:ConnectionWindow(self,udid)
+            except Exception as exc:self.status.set('无法打开连接配置：'+str(exc))
+
     def setup_selected(self):
         udid=self.selected()
         if not udid:return
@@ -213,8 +257,8 @@ class Fleet:
         if self.__dict__.get('scanning'):
             self.pending_starts[udid]=dict(options);self.status.set('已安排开始，连接检测完成后自动执行。');self.redraw();return
         try:
-            if udid not in self.online:raise RuntimeError('设备未通过 USB 连接，请刷新连接。')
-            if not self.online[udid].get('paired') or not self.online[udid].get('developer'):raise RuntimeError('USB 通信未就绪，请解锁、信任电脑并检查开发者模式后刷新。')
+            if udid not in self.online:raise RuntimeError('所选连接方式未就绪，请刷新连接或检查“连接方式”。')
+            if not self.online[udid].get('paired') or not self.online[udid].get('developer'):raise RuntimeError('所选设备的开发通信未就绪，请检查配对和开发者模式后刷新。')
             p=self.console(udid);p.batch_mode=True
             try:p.start(**options)
             finally:p.batch_mode=False
@@ -227,6 +271,10 @@ class Fleet:
     def stop_selected(self):
         udid=self.selected()
         if udid:self.stop_device(udid)
+    def hosting_action(self,method):
+        udid=self.selected();panel=self.panels.get(udid)
+        if panel:getattr(panel,method)();self.redraw()
+
     def stop_device(self,udid):
         self.__dict__.get('pending_starts',{}).pop(udid,None)
         p=self.panels.get(udid)
@@ -249,13 +297,25 @@ class Fleet:
     def poll(self):
         try:
             while True:
-                event,value=self.events.get_nowait();self.scanning=False;self.scan_progress.stop();self.scan_progress.pack_forget();self.refresh_button.configure(state='normal',text='刷新连接')
+                event,value=self.events.get_nowait()
+                if event=='remote_devices':
+                    self.network_scanning=False;self.next_network_check=time.monotonic()+15
+                    started,rows=value
+                    if self.scanning or started<(self.last_refresh or 0):continue
+                    changed=any(self.online.get(d['udid'])!=d for d in rows)
+                    for d in rows:self.online[d['udid']]=d
+                    if changed:
+                        ready_count=sum(bool(d.get('paired') and d.get('developer')) for d in self.online.values())
+                        self.status.set(f'控制连接状态已更新，{ready_count} 台可连接 iPhone。')
+                    continue
+                self.scanning=False;self.scan_progress.stop();self.scan_progress.pack_forget();self.refresh_button.configure(state='normal',text='刷新连接')
                 if event=='devices':
                     self.online={d['udid']:d for d in value}
                     for d in value:
                         try:self.store.add(d)
                         except (OSError,ValueError,KeyError):self.errors[d['udid']]='配置文件无法读取，请检查该设备 config.json。'
-                    self.last_refresh=time.time();self.status.set(f'连接检测完成，{len(value)} 台 USB iPhone。各设备可独立配置与运行。')
+                    ready_count=sum(bool(d.get('paired') and d.get('developer')) for d in value)
+                    self.last_refresh=time.time();self.status.set(f'连接检测完成，{ready_count} 台可连接 iPhone。各设备可独立配置与运行。')
                     pending=self.pending_starts;all_options=self.pending_all;self.pending_starts={};self.pending_all=None
                     if all_options is not None:self.start_all(**all_options)
                     else:
@@ -263,14 +323,18 @@ class Fleet:
                 else:
                     self.pending_starts.clear();self.pending_all=None;self.status.set('连接检测失败：'+value+'；请刷新后重试。')
         except queue.Empty:pass
+        if not self.closing and time.monotonic()>=self.__dict__.get('next_network_check',float('inf')):
+            self.next_network_check=time.monotonic()+15;self.refresh_remote_health()
         try:self.redraw()
         except Exception as exc:self.status.set('设备列表更新失败：'+str(exc)[:180])
         if self.closing:
             busy=bool(self.device_window and self.device_window.busy) or any((p.worker and p.worker.is_alive()) or (p.device_window and p.device_window.busy) for p in self.panels.values())
+            busy=busy or any(w.busy for w in self.__dict__.get('connection_windows',[]))
             if not busy:
                 import runtime_manager
                 runtime_manager.stop_all();self.root.destroy();return
         self.root.after(250,self.poll)
     def close(self):
+        for window in self.__dict__.get('connection_windows',[]):window.stop_event.set()
         if self.__dict__.get('preview'):self.preview.close()
         self.closing=True;self.start_all_button.configure(state='disabled');self.add_button.configure(state='disabled');self.stop_all();self.status.set('正在结束各设备任务，完成后退出…')

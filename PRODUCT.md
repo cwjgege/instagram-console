@@ -6,7 +6,7 @@ product
 
 ## Users
 
-Mac 用户通过 USB 配置自己的 iPhone，完成控制组件签名后手动开始或停止浏览。
+Mac 用户通过 USB 首次配置自己的 iPhone，并可验证本地 Wi-Fi 或远程已有 WDA 连接，完成控制组件签名后手动开始或停止浏览。
 
 ## Product Purpose
 

@@ -29,6 +29,12 @@ def main():
         os.environ.setdefault('SSL_CERT_FILE',certifi.where())
     if len(sys.argv)==3 and sys.argv[1]=='--self-test':
         self_test(sys.argv[2]);return
+    if len(sys.argv)==4 and sys.argv[1]=='--check-connection':
+        import connections as cn
+        try:
+            setting=cn.load(sys.argv[2]);info=cn.checked(setting['wda_url'],setting['fingerprint']);result={'ready':True,'info':info}
+        except Exception as exc:result={'ready':False,'error':type(exc).__name__+': '+str(exc)}
+        Path(sys.argv[3]).write_text(json.dumps(result,ensure_ascii=False,indent=2));return
     DATA.mkdir(parents=True,exist_ok=True)
     log=(DATA/'console.log').open('a',buffering=1)
     sys.stdout=sys.stderr=log

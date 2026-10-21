@@ -88,3 +88,18 @@ class FleetInteraction(unittest.TestCase):
   f=self.fleet();f.online={};f.pending_all={}
   with patch.object(dm,'signing_record',return_value=None):view=f.device_view({'device_udid':'a'*40})
   self.assertIn('检测',view['state']);self.assertIn('检测',view['detail']);self.assertNotIn('请连接',view['detail'])
+
+ def test_remote_probe_failure_is_visible_and_does_not_claim_usb_is_missing(self):
+  f=self.fleet();f.scanning=False;udid='a'*40;f.online={udid:{'paired':False,'developer':False,'connection_error':'TimeoutError: control port timed out'}}
+  with patch.object(dm,'signing_record',return_value=None),patch.object(dm,'setup_status',return_value=None),patch('connections.load',return_value={'mode':'remote'}):view=f.device_view({'device_udid':udid})
+  self.assertFalse(view['ready']);self.assertEqual(view['state'],'控制连接异常');self.assertIn('control port timed out',view['detail']);self.assertNotIn('请连接这台手机',view['detail'])
+ def test_background_health_recovers_remote_without_manual_refresh(self):
+  import queue
+  f=self.fleet();f.scanning=False;f.last_refresh=None;f.online={};f.events=queue.Queue();f.root=Mock()
+  row={'udid':'a'*40,'paired':True,'developer':True,'transport':'remote'};f.events.put(('remote_devices',(1,[row])))
+  f.poll();self.assertEqual(f.online[row['udid']],row);self.assertFalse(f.network_scanning);self.assertIn('1 台',f.status.set.call_args.args[0])
+ def test_old_background_health_cannot_overwrite_new_manual_detection(self):
+  import queue
+  f=self.fleet();f.scanning=False;f.last_refresh=10;f.online={'a':{'paired':True}};f.events=queue.Queue();f.root=Mock()
+  f.events.put(('remote_devices',(1,[{'udid':'a','paired':False}])))
+  f.poll();self.assertTrue(f.online['a']['paired'])

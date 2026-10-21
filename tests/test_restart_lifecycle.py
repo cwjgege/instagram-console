@@ -9,7 +9,7 @@ CFG=json.loads(Path('src/default-config.json').read_text())
 class RestartLifecycle(unittest.TestCase):
  def panel(self):
   p=Panel.__new__(Panel)
-  p.log_ui=Mock();p.root=Mock();p.status=Mock();p.start_button=Mock();p.stop_button=Mock();p.append=Mock();p.set_running=Mock()
+  p.log_ui=Mock();p.root=Mock();p.status=Mock();p.start_button=Mock();p.stop_button=Mock();p.pause_button=Mock();p.resume_button=Mock();p.append=Mock();p.set_running=Mock()
   p.worker=Mock();p.worker.is_alive.return_value=True
   p.generation=2;p.run_ui_active=True;p.worker_result=None;p.finished_row=None;p.phase_text='';p.phase_started=0
   p.events=queue.Queue();p.stop_event=threading.Event();p.pending_start=None;p.closing=False;p.stop_requested_at=None

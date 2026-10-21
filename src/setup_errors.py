@@ -29,6 +29,10 @@ def attempt_text(runtime,positions):
 def classify_setup_error(error,logs=''):
     if isinstance(error,SetupError):return error
     text=(str(error)+'\n'+logs).casefold()
+    if 'invalid trust settings' in text and 'restore system default' in text:
+        return SetupError('certificate_trust','Mac 开发证书的信任设置无效。请在钥匙串访问中双击本次 Apple Development 证书，将“使用此证书时”恢复为“使用系统默认值”，保存后重试；不要设为“始终信任”。','签名')
+    if 'unable to find a device matching the provided destination' in text:
+        return SetupError('xcode_device_missing','Xcode 没有把所选手机列为可用安装目标。请检查 Xcode 的设备支持范围、配对与连接；iOS 16 请使用支持它的 Xcode 版本。无需先重建证书。','设备支持')
     if any(s in text for s in ('developer app certificate is not trusted','untrusted developer','开发者未受信任')):
         return SetupError('developer_untrusted','控制组件启动被手机拒绝：开发者 App 尚未受信任或未完成验证。请在手机「设置 → 通用 → VPN 与设备管理」选择本次签名账号并完成信任/验证；保持联网和解锁，然后点击「重新验证已安装组件」。无需反复重新签名。')
     if any(s in text for s in ('provisioning profile has expired','certificate has expired','signing certificate is invalid','certificate was revoked')):

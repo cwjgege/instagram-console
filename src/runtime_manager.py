@@ -88,10 +88,14 @@ def _stop(key):
             except ProcessLookupError:pass
 
 def stop_device(udid):
+    import connections
+    connections.stop_device(udid)
     with device_lock(udid):
         _stop((udid,'appium'));_stop((udid,'legacy'))
 
 def stop_all():
+    import connections
+    connections.stop_all()
     for udid in {k[0] for k in list(_PROCESSES)}:stop_device(udid)
 atexit.register(stop_all)
 

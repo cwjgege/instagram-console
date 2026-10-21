@@ -26,6 +26,8 @@ from page_state import (PageBlocked, classify, visible_nodes, screen_height, sea
 from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
+class ManualResume(BaseException):
+    """Unwind all stale navigation/interaction frames after a human handoff."""
 AUTOMATION_DEFAULTS = dict(like_interval_min=3,like_interval_max=8,recovery_enabled=True,recovery_attempts=3,recovery_run_limit=5,
     gesture_left=30,gesture_right=58,gesture_top=28,gesture_bottom=66,
     gesture_distance_min=22,gesture_distance_max=32,gesture_duration_min=220,gesture_duration_max=480,
@@ -62,7 +64,7 @@ def transport_error(exc):
     return isinstance(exc,(TimeoutError,ConnectionError)) or any(s in text for s in (
         'socket hang up','connection refused','connection reset','timed out','invalid session id',
         'could not proxy command','remote end closed','econnreset','econnrefused',
-        'unknown device or simulator udid'))
+        'unknown device or simulator udid','no route to host','network is unreachable'))
 
 class Halt(Exception):
     pass
@@ -151,6 +153,72 @@ class Runner:
         self.feature_state = {'search': {'enabled': bool(config.get('enable_search')), 'reason': ''}}
         self.search_failures = 0
         self.search_step = None
+        self.pause_requested=threading.Event()
+        self.pause_state='running'
+        self.pause_enabled=False
+        self._handling_pause=False
+        self.handoff_skip_keys=set()
+        self.skip_interactions_once=False
+        self.current_post_key=None
+
+    def request_pause(self):
+        if self.pause_state=='running':
+            self.pause_state='pausing';self.pause_requested.set()
+
+    def request_resume(self):
+        if self.pause_state=='paused':
+            self.pause_state='resuming';self.pause_requested.clear()
+
+    def pause_keepalive(self):
+        try:
+            self.http('GET',self.path+'/timeouts',timeout=3)
+            return True
+        except Exception:return False
+
+    def manual_handoff(self):
+        self._handling_pause=True
+        started=time.monotonic()
+        if self.current_post_key:self.handoff_skip_keys.add(self.current_post_key)
+        reason=''
+        reconnect_on_resume=False
+        try:
+            while True:
+                self.pause_state='paused'
+                self.log('paused',message=reason or '已暂停托管，可以手动操作手机；完成后点击继续托管。')
+                heartbeat=time.monotonic()+30
+                while self.pause_requested.is_set():
+                    if self.stop.is_set() or (self.runtime/'STOP').exists():raise Halt('已手动停止')
+                    if time.monotonic()>=heartbeat:
+                        # Query Appium session settings only; never send a phone gesture or activate an app.
+                        reconnect_on_resume=not self.pause_keepalive() or reconnect_on_resume
+                        heartbeat=time.monotonic()+30
+                    self.stop.wait(.1)
+                self.log('resuming',message='正在重新识别手机页面，不会继续之前的互动…')
+                try:
+                    if reconnect_on_resume:self.connect();reconnect_on_resume=False
+                    app=self.mobile('activeAppInfo')
+                    if app.get('bundleId')!='com.burbn.instagram':
+                        self.mobile('activateApp',bundleId='com.burbn.instagram');self.wait(1)
+                    tree=self.snapshot();state=self.observe(tree)
+                    if state.kind in ('input_unknown','sheet'):raise NavigationLost('请先关闭手动输入或浮层，再点击继续托管。')
+                    self.reels(initial_tree=tree if state.kind!='other_app' else None)
+                    post=self.read_reel()
+                    if post['key']:self.handoff_skip_keys.add(post['key'])
+                    break
+                except Exception as exc:
+                    if transport_error(exc) or getattr(exc,'kind','')=='invalid session id':reconnect_on_resume=True
+                    self.pause_requested.set()
+                    reason='继续托管未通过页面检查，保持暂停：'+str(exc)[:240]
+                    self.log('resume_blocked',message=reason)
+            self.navigation_epoch+=1;self.ai_cache.clear();self.active_search_term=None
+            self.last_tree=None;self.page_state=None;self.stagnant=0;self.skip_interactions_once=True
+            self.search_step=None;self.refresh_required=False;self.unchanged_swipes=0
+            self.pause_state='running'
+            self.log('resumed',message='已重新识别页面，继续浏览；跳过接管前及恢复时视频的互动。')
+        finally:
+            if self.deadline:self.deadline+=time.monotonic()-started
+            self._handling_pause=False
+        raise ManualResume()
 
     def http(self,method,path,data=None,timeout=35):
         url=getattr(self,'server_url',None)
@@ -166,7 +234,9 @@ class Runner:
     def check(self):
         if self.stop.is_set() or (self.runtime / 'STOP').exists():
             raise Halt('已手动停止')
-        if self.deadline and time.monotonic() >= self.deadline:
+        if getattr(self,'pause_requested',None) is not None and self.pause_requested.is_set() and self.deadline and self.pause_enabled and not self.in_interaction and not self._handling_pause:
+            self.manual_handoff()
+        if self.deadline and not self._handling_pause and time.monotonic() >= self.deadline:
             raise Halt('本次时长已到')
 
     def wait(self, seconds):
@@ -230,13 +300,23 @@ class Runner:
         return state
 
     def snapshot(self):
-        info = self.mobile('activeAppInfo')
-        if info.get('bundleId') != 'com.burbn.instagram':
+        # App transitions can briefly return an empty/system bundle. Only retry reads:
+        # never repeat a gesture or steal foreground while checking this state.
+        for attempt in range(3):
+            self.check()
+            info=self.mobile('activeAppInfo')
+            if isinstance(info,dict) and info.get('bundleId')=='com.burbn.instagram':
+                tree=ET.fromstring(self.command('GET','/source'))
+                app=tree if tree.tag=='XCUIElementTypeApplication' else tree.find('.//XCUIElementTypeApplication')
+                if app is None or app.get('bundleId') in (None,'','com.burbn.instagram'):
+                    self.observe(tree)
+                    if attempt:self.log('foreground_recovered',message='只读复查已确认 Instagram 前台，无需重启或恢复页面',checks=attempt+1)
+                    return tree
             self.last_tree=None
-            raise NavigationLost('Instagram 已离开前台')
-        tree = ET.fromstring(self.command('GET','/source'))
-        self.observe(tree)
-        return tree
+            if attempt<2:
+                self.log('foreground_recheck',message='前台状态暂未确认，正在只读复查',attempt=attempt+1)
+                self.wait(.35 if attempt==0 else .7)
+        raise NavigationLost('连续三次检查未确认 Instagram 前台，需重新识别页面')
 
     def diagnose(self, stage, exc):
         # Diagnostics must never mask the original error or send a UI action.
@@ -273,7 +353,10 @@ class Runner:
 
     def connect(self, force_new=False):
         self.log('connecting', message='正在连接指定 iPhone')
-        self.wait_for_usb()
+        import connections
+        connection=connections.load(self.cfg['device_udid']) if self.managed else {'mode':'usb'}
+        network=connection['mode']!='usb'
+        if not network:self.wait_for_usb()
         if self.managed:
             from device_manager import child_env,prepare_vendor,signing_record
             from runtime_manager import ensure_server,ensure_legacy
@@ -285,7 +368,10 @@ class Runner:
                 legacy=str(self.device_info['ios']).split('.')[0]=='16'
                 if legacy!=(record.get('controller')=='legacy16'):
                     raise SetupError('controller_mismatch','手机系统与已配置的控制组件不匹配，请在此设备向导安装对应的 iOS 16 / 新版组件。','设备支持')
-            if record and record.get('controller')=='legacy16':ensure_legacy(self.cfg['device_udid'],record,notify,self.stop)
+            if network:
+                self.network_url=connections.ensure_wifi(self.cfg['device_udid'],notify,self.stop)
+                force_new=True
+            elif record and record.get('controller')=='legacy16':ensure_legacy(self.cfg['device_udid'],record,notify,self.stop)
         try:
             self.http('GET','/status',timeout=3)
         except Exception:
@@ -309,7 +395,8 @@ class Runner:
             try:old=json.loads(state.read_text())
             except (OSError,ValueError):old={};state.unlink(missing_ok=True)
             caps = old.get('capabilities',{})
-            if caps.get('udid',caps.get('appium:udid')) == self.cfg['device_udid'] and (not self.managed or old.get('server_url')==self.server_url):
+            if old.get('network_url'):force_new=True
+            if not force_new and caps.get('udid',caps.get('appium:udid')) == self.cfg['device_udid'] and (not self.managed or old.get('server_url')==self.server_url):
                 try:
                     self.path = '/session/' + old['sessionId']
                     self.log('connecting',message='正在检查上次的手机控制连接…')
@@ -340,7 +427,7 @@ class Runner:
                     try:self.http('DELETE','/session/'+sid,timeout=8)
                     except Exception:pass
             state.unlink(missing_ok=True);self.path=None
-        payload = json.loads((self.runtime / 'session-request.json').read_text())
+        payload = connections.network_payload(self.cfg,self.network_url) if network else json.loads((self.runtime / 'session-request.json').read_text())
         payload['capabilities']['alwaysMatch']['appium:wdaConnectionTimeout']=20000
         payload['capabilities']['alwaysMatch']['appium:waitForIdleTimeout']=1
         # Old saved requests must not reset on-device developer trust by uninstalling WDA.
@@ -352,11 +439,11 @@ class Runner:
             self.check()
         if payload['capabilities']['alwaysMatch']['appium:udid'] != self.cfg['device_udid']:
             raise RuntimeError('设备标识不一致，已停止')
-        if self.managed:
+        if self.managed and not network:
             from runtime_manager import endpoints
             ports=endpoints(self.cfg['device_udid']);caps=payload['capabilities']['alwaysMatch']
             caps.update({'appium:wdaLocalPort':ports['wda'],'appium:mjpegServerPort':ports['mjpeg'],'appium:wdaRemotePort':8100})
-            if record and record.get('controller')=='legacy16':caps['appium:webDriverAgentUrl']=f"http://127.0.0.1:{ports['wda']}"
+            if not network and record and record.get('controller')=='legacy16':caps['appium:webDriverAgentUrl']=f"http://127.0.0.1:{ports['wda']}"
         self.log('connecting',message='正在建立手机控制会话，停止时需等待当前连接命令结束…')
         positions=log_positions(self.runtime)
         try:value=self.http('POST','/session',payload,timeout=240)
@@ -373,8 +460,10 @@ class Runner:
 
         if self.managed:
             value['server_url']=self.server_url
-            atomic_json(self.runtime/'setup-state.json',{'status':'ready','message':'控制组件已连接验证。'})
-            (self.runtime/'pending-setup.json').unlink(missing_ok=True)
+            if network:value['network_url']=self.network_url
+            if connection['mode']!='remote':
+                atomic_json(self.runtime/'setup-state.json',{'status':'ready','message':'控制组件已连接验证。'})
+                (self.runtime/'pending-setup.json').unlink(missing_ok=True)
         atomic_json(state,value)
         self.path = '/session/' + value['sessionId']
         self.check()
@@ -994,82 +1083,96 @@ class Runner:
             if self.analysis_only:
                 self.ai_comment(self.read_reel(),preview=True)
                 raise Halt('当前视频预览已完成，未发送评论')
+            self.pause_enabled=True
             next_search=time.monotonic()+self.rng.uniform(45,90)
             last_key=None
             while self.swipes < self.cfg['max_swipes_per_run']:
                 try:
-                    self.check()
-                    post=self.read_reel()
-                    self.counts['watched']+=1
-                    related=self.related(post)
-                    self.log('watch',message='观看相关视频' if related else '浏览视频',author=post['author'],related=related)
-                    if post['key'] and post['key']==last_key:
-                        self.stagnant+=1
-                    else:
-                        self.stagnant=0
-                    if self.stagnant>=3:
-                        self.refresh_required=True
-                        raise NavigationLost('连续翻页后仍停留同一内容')
-                    last_key=post['key']
-                    dwell=self.rng.uniform(12,30) if related else self.rng.uniform(3,10)
-                    if self.rng.random()<.12:
-                        dwell+=self.rng.uniform(10,25)
-                    self.wait(dwell)
-                    self.consider_like(post,related)
-                    if related and not self.browse_only:
-                        self.in_interaction=True
-                        if self.cfg['enable_saves'] and self.rng.random()<self.cfg['save_probability']:
-                            self.toggle_on(post,'saves','save-button',{'save','save post'})
-                        if self.cfg['enable_comments'] and self.cfg['comments_mode']!='ai' and self.rng.random()<self.cfg['comment_probability']:
-                            self.comment(post)
-                        self.in_interaction=False
-                    if (not self.browse_only and self.cfg['enable_comments'] and self.cfg['comments_mode']=='ai'
-                        and self.rng.random()<self.cfg['comment_probability']):
-                        self.in_interaction=True
-                        self.ai_comment(post)
-                        self.in_interaction=False
-                    if (not self.browse_only and self.cfg['enable_search'] and self.cfg['keywords']
-                        and self.feature_state['search']['enabled'] and self.search_attempts<self.cfg['max_searches_per_run'] and time.monotonic()>=next_search):
-                        next_search=time.monotonic()+self.rng.uniform(180,360)
-                        self.search_optional(self.rng.choice(self.cfg['keywords']))
+                    try:
+                        self.check()
+                        post=self.read_reel()
+                        self.current_post_key=post['key']
+                        skip_interaction=self.skip_interactions_once or post['key'] in self.handoff_skip_keys
+                        self.skip_interactions_once=False
+                        self.counts['watched']+=1
+                        related=self.related(post)
+                        self.log('watch',message='观看相关视频' if related else '浏览视频',author=post['author'],related=related)
+                        if post['key'] and post['key']==last_key:
+                            self.stagnant+=1
+                        else:
+                            self.stagnant=0
+                        if self.stagnant>=3:
+                            self.refresh_required=True
+                            raise NavigationLost('连续翻页后仍停留同一内容')
+                        last_key=post['key']
+                        dwell=self.rng.uniform(12,30) if related else self.rng.uniform(3,10)
+                        if self.rng.random()<.12:
+                            dwell+=self.rng.uniform(10,25)
+                        self.wait(dwell)
+                        if skip_interaction:self.log('handoff_skip',message='人工接管后的当前视频跳过互动')
+                        if not skip_interaction:self.consider_like(post,related)
+                        self.check()
+                        if related and not self.browse_only and not skip_interaction:
+                            self.in_interaction=True
+                            if self.cfg['enable_saves'] and self.rng.random()<self.cfg['save_probability']:
+                                self.toggle_on(post,'saves','save-button',{'save','save post'})
+                            if self.cfg['enable_comments'] and self.cfg['comments_mode']!='ai' and self.rng.random()<self.cfg['comment_probability']:
+                                self.comment(post)
+                            self.in_interaction=False
+                        if (not skip_interaction and not self.browse_only and self.cfg['enable_comments'] and self.cfg['comments_mode']=='ai'
+                            and self.rng.random()<self.cfg['comment_probability']):
+                            self.in_interaction=True
+                            self.ai_comment(post)
+                            self.in_interaction=False
+                        if (not self.browse_only and self.cfg['enable_search'] and self.cfg['keywords']
+                            and self.feature_state['search']['enabled'] and self.search_attempts<self.cfg['max_searches_per_run'] and time.monotonic()>=next_search):
+                            next_search=time.monotonic()+self.rng.uniform(180,360)
+                            self.search_optional(self.rng.choice(self.cfg['keywords']))
+                            last_key=None
+                            self.back_depth=0
+                            self.position=0
+                            continue
+                        if self.back_depth==0 and self.position>=2 and self.rng.random()<.1:
+                            burst=self.rng.choices([1,2],[.8,.2])[0]
+                            for _ in range(min(burst,self.position,self.cfg['max_swipes_per_run']-self.swipes)):
+                                self.swipe('down')
+                                self.wait(self.rng.uniform(2,5))
+                            self.back_depth=burst
+                        else:
+                            burst=self.rng.choices([1,2,3],[.8,.16,.04])[0]
+                            for _ in range(min(burst,self.cfg['max_swipes_per_run']-self.swipes)):
+                                self.swipe('up')
+                                if burst>1:
+                                    self.wait(self.rng.uniform(1.5,3.5))
+                            self.back_depth=max(0,self.back_depth-burst)
+                    except TransportLost:
+                        self.recover_connection()
                         last_key=None
-                        self.back_depth=0
-                        self.position=0
                         continue
-                    if self.back_depth==0 and self.position>=2 and self.rng.random()<.1:
-                        burst=self.rng.choices([1,2],[.8,.2])[0]
-                        for _ in range(min(burst,self.position,self.cfg['max_swipes_per_run']-self.swipes)):
-                            self.swipe('down')
-                            self.wait(self.rng.uniform(2,5))
-                        self.back_depth=burst
-                    else:
-                        burst=self.rng.choices([1,2,3],[.8,.16,.04])[0]
-                        for _ in range(min(burst,self.cfg['max_swipes_per_run']-self.swipes)):
-                            self.swipe('up')
-                            if burst>1:
-                                self.wait(self.rng.uniform(1.5,3.5))
-                        self.back_depth=max(0,self.back_depth-burst)
-                except TransportLost:
-                    self.recover_connection()
-                    last_key=None
-                    continue
-                except NavigationLost as exc:
-                    if self.in_interaction:raise RuntimeError('互动时页面变化，已停止以避免误操作') from exc
-                    self.diagnose('navigation',exc)
-                    self.log('navigation_lost',message=str(exc))
-                    try:self.recover_reels()
-                    except TransportLost:self.recover_connection()
-                    last_key=None
+                    except NavigationLost as exc:
+                        if self.in_interaction:raise RuntimeError('互动时页面变化，已停止以避免误操作') from exc
+                        self.diagnose('navigation',exc)
+                        self.log('navigation_lost',message=str(exc))
+                        try:self.recover_reels()
+                        except TransportLost:self.recover_connection()
+                        last_key=None
+                        continue
+                except ManualResume:
+                    self.in_interaction=False;last_key=None;self.back_depth=0;self.position=0
+                    next_search=time.monotonic()+self.rng.uniform(45,90)
                     continue
         except Halt as e:
+            self.pause_enabled=False
             self.log('stopped',message=str(e))
             status='stopped' if self.stop.is_set() or (self.runtime/'STOP').exists() else 'complete'
         except Exception as e:
+            self.pause_enabled=False
             self.diagnose('fatal',e)
             status='error'
             message='手机控制连接中断，当前动作结果未确认，已停止且不会重发' if transport_error(e) else (str(e) or type(e).__name__)
             self.log('error',message=message,detail=str(e)[:1800])
         finally:
+            self.pause_enabled=False
             if self.managed and self.path:
                 try:
                     self.http('DELETE',self.path,timeout=8)

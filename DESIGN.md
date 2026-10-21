@@ -19,3 +19,9 @@ Palette: ink `#182329`, secondary text `#54636E`, blue `#185ADB`, green `#176948
 - Setup distinguishes USB pairing, installed controller inventory, signature validity, and a verified control session. Missing Settings developer entries alone never imply failure.
 - Install failure feedback identifies the current attempt and next action. Verification of an existing signed build has its own persistent button; it does not request a new signature.
 - Reconnection limits explicitly describe a five-minute window. Empty transport errors still display an actionable reason.
+
+- Transport settings are per device and separate from browsing preferences. USB remains the default; local Wi-Fi and externally managed WDA explain their distinct startup and signing requirements.
+- Remote endpoint fields appear only for remote mode. Verification runs off the UI thread; old settings remain until verification and binding succeed.
+- Network fingerprint checks prevent accidental endpoint changes; they are not authentication. Unverified wireless support is visibly identified as experimental.
+
+- Wireless onboarding leads with LAN discovery and import/export. Device details are collapsed by default and auto-filled after selection. Export uses a strict connection-field whitelist; import verifies the original fingerprint before saving, reports partial failures, and preserves existing browsing settings. A fingerprint-derived identifier is explicitly distinguished from hardware UDID.

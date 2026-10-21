@@ -45,7 +45,7 @@ class Panel:
         root.geometry(f'940x{min(820,root.winfo_screenheight()-100)}');root.minsize(820,580)
         outer=ttk.Frame(root,padding=20);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text=self.cfg.get('device_name') or '设备控制台',style='Title.TLabel').pack(anchor='w')
-        self.device_label=tk.StringVar(value=('iOS '+self.cfg.get('device_ios','未知')+' · USB 实机控制 · 手动运行'))
+        self.device_label=tk.StringVar(value=('iOS '+self.cfg.get('device_ios','未知')+' · 手动运行'))
         ttk.Label(outer,textvariable=self.device_label,style='Muted.TLabel').pack(anchor='w',pady=(3,5))
         device_row=ttk.Frame(outer);device_row.pack(fill='x',pady=(0,6))
         self.signature_status=tk.StringVar(value='签名状态待检查')
@@ -66,6 +66,8 @@ class Panel:
         self.start_button.pack(side='left')
         self.stop_button=ttk.Button(actions,text='停止运行',style='Action.TButton',command=self.stop,state='disabled')
         self.stop_button.pack(side='left',padx=10)
+        self.pause_button=ttk.Button(actions,text='暂停托管',command=self.pause_hosting,state='disabled');self.pause_button.pack(side='left',padx=(0,8))
+        self.resume_button=ttk.Button(actions,text='继续托管',command=self.resume_hosting,state='disabled');self.resume_button.pack(side='left',padx=(0,8))
         self.test_button=ttk.Button(actions,text='试运行 45 秒（仅浏览）',command=lambda:self.start(test=True))
         self.test_button.pack(side='left',padx=6)
         footer=ttk.Frame(outer);footer.pack(side='bottom',fill='x',pady=(12,0))
@@ -252,6 +254,13 @@ class Panel:
 
     def update_signature(self):
         import device_manager as dm
+        import connections
+        udid=self.cfg.get('device_udid','')
+        try:mode=connections.load(udid)['mode'] if udid else 'usb'
+        except ValueError as exc:self.signature_status.set('连接配置异常：'+str(exc));return
+        if mode=='remote':
+            self.signature_status.set('远程已有 WDA · 签名与重新启动由远端维护')
+            return
         record=dm.signing_record(self.cfg.get('device_udid','')) if FROZEN or self.cfg.get('managed_device') else None
         state,remaining=dm.expiry_state(record,self.cfg.get('signature_warn_hours',48))
         if not FROZEN and not self.cfg.get('managed_device'):
@@ -527,13 +536,16 @@ class Panel:
             self.status.set('设备配置正在进行，请等待完成。');return
         if FROZEN or self.cfg.get('managed_device'):
             import device_manager as dm
-            blocker=dm.setup_blocker(self.cfg.get('device_udid',''))
+            import connections
+            try:external=connections.load(self.cfg.get('device_udid',''))['mode']=='remote' if self.cfg.get('device_udid') else False
+            except ValueError as exc:self.status.set(str(exc));return
+            blocker=None if external else dm.setup_blocker(self.cfg.get('device_udid',''))
             if blocker:
                 self.status.set(blocker)
                 if not self.__dict__.get('batch_mode'):self.open_devices()
                 return
             record=dm.signing_record(self.cfg.get('device_udid',''))
-            if dm.expiry_state(record)[0] in ('unknown','expired'):
+            if not external and dm.expiry_state(record)[0] in ('unknown','expired'):
                 self.status.set('请先完成设备配置或重新签名。')
                 if not self.__dict__.get('batch_mode'):self.open_devices()
                 return
@@ -583,6 +595,13 @@ class Panel:
         self.stop_button.configure(state='disabled')
         self.start_button.configure(state='normal' if not self.closing else 'disabled',text='停止后重新开始')
         self.status.set('正在停止，等待当前手机命令结束；可点击“停止后重新开始”排队启动。')
+
+    def pause_hosting(self):
+        if self.worker and self.worker.is_alive() and not self.stop_event.is_set():
+            self.runner.request_pause();self.status.set('正在暂停，等待当前动作完成；显示已暂停托管后再操作手机。')
+
+    def resume_hosting(self):
+        if self.worker and self.worker.is_alive() and not self.stop_event.is_set():self.runner.request_resume()
 
     def append(self,text):
         self.log_text.configure(state='normal')
@@ -644,6 +663,10 @@ class Panel:
             self.status.set(f'正在停止（已等待 {elapsed} 秒）'+('，完成后自动重新启动…' if self.pending_start is not None else '，等待当前手机命令结束…'))
         elif self.run_ui_active and self.phase_text.startswith('正在'):
             self.status.set(self.phase_text+f'（已等待 {int(time.monotonic()-self.phase_started)} 秒）')
+        active=bool(self.worker and self.worker.is_alive() and not self.stop_event.is_set())
+        pause_state=getattr(getattr(self,'runner',None),'pause_state','running')
+        self.pause_button.configure(state='normal' if active and pause_state=='running' else 'disabled')
+        self.resume_button.configure(state='normal' if active and pause_state=='paused' else 'disabled')
         if hasattr(self,'runner'):
             feature=self.runner.feature_state['search']
             self.feature_status.set('搜索状态：'+('本轮启用' if feature['enabled'] else (feature['reason'] or '本轮未启用')))

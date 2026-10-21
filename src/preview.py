@@ -1,4 +1,4 @@
-"""Independent, read-only USB screen stream. Frames stay in memory."""
+"""Independent, read-only screen stream. Frames stay in memory."""
 import io,json,os,re,select,subprocess,tempfile,threading,time
 from pathlib import Path
 from PIL import Image,ImageOps,ImageTk
@@ -31,6 +31,18 @@ class FrameParser:
 def stream_request(udid):
     import device_manager as dm
     dm.device_dir(udid)
+    import connections
+    setting=connections.load(udid)
+    if setting['mode']!='usb':
+        if setting['mode']=='remote':url=setting.get('preview_url')
+        else:
+            try:url=json.loads((dm.device_dir(udid)/'network-runtime.json').read_text()).get('preview_url')
+            except (OSError,ValueError):url=None
+        if not url:raise RuntimeError('网络预览未配置，浏览任务可独立运行。')
+        connections.validate_url(url)
+        from urllib.parse import urlsplit
+        u=urlsplit(url);vendor=dm.prepare_vendor()
+        return vendor,{'vendor':str(vendor),'udid':udid,'port':u.port or (443 if u.scheme=='https' else 80),'host':u.hostname,'tls':u.scheme=='https'}
     try:ports=json.loads((dm.DATA/'ports.json').read_text())[udid.lower()];port=ports['mjpeg']
     except (OSError,ValueError,KeyError,TypeError):raise RuntimeError('等待控制组件就绪，开始浏览后会自动连接。')
     if type(port) is not int or not 1024<port<65536:raise RuntimeError('预览端口配置不可用，请重新检查设备配置。')
@@ -145,7 +157,7 @@ class PreviewPane:
         self.quality=tk.StringVar(value='流畅 · 10 帧/秒')
         self.quality_picker=ttk.Combobox(quality,textvariable=self.quality,values=list(PREVIEW_RATES),state='readonly',width=17)
         self.quality_picker.pack(side='right');self.quality_picker.bind('<<ComboboxSelected>>',self.change_quality)
-        ttk.Label(self.frame,text='随时切换；帧率越高，电脑开销越大。实际帧率受手机和 USB 连接影响。',style='Muted.TLabel',wraplength=280).pack(anchor='w',pady=(0,10))
+        ttk.Label(self.frame,text='随时切换；帧率越高，电脑开销越大。实际帧率受手机和连接质量影响。',style='Muted.TLabel',wraplength=280).pack(anchor='w',pady=(0,10))
         footer=ttk.Frame(self.frame);footer.pack(side='bottom',fill='x',pady=(10,0))
         self.state_label=ttk.Label(footer,textvariable=self.state,wraplength=280);self.state_label.pack(fill='x')
         ttk.Label(footer,textvariable=self.updated,style='Muted.TLabel',wraplength=280).pack(fill='x',pady=(5,0))
