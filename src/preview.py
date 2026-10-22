@@ -1,5 +1,5 @@
 """Independent, read-only screen stream. Frames stay in memory."""
-import io,json,os,re,select,subprocess,tempfile,threading,time
+import base64,io,json,os,re,select,subprocess,tempfile,threading,time
 from pathlib import Path
 from PIL import Image,ImageOps,ImageTk
 import tkinter as tk
@@ -99,8 +99,35 @@ class PreviewSource:
             except Exception as exc:
                 message=str(exc) if isinstance(exc,RuntimeError) else '预览连接中断，正在重试；浏览任务不受此错误控制。'
                 self.publish(revision,status=message)
+                if self.current(revision):
+                    try:self._snapshot_stream(udid,revision)
+                    except Exception:pass
             if self.current(revision):self.wake.wait(3)
             self.wake.clear()
+    def _snapshot_stream(self,udid,revision):
+        """Bounded low-rate fallback when a network MJPEG listener is absent."""
+        import connections as cn,device_manager as dm
+        setting=cn.load(udid)
+        if setting['mode']=='usb':return
+        if setting['mode']=='remote':url=setting['wda_url']
+        else:url=json.loads((dm.device_dir(udid)/'network-runtime.json').read_text())['url']
+        cn.checked(url,setting.get('fingerprint'))
+        end=time.monotonic()+30
+        while self.current(revision) and time.monotonic()<end:
+            started=time.monotonic()
+            # Verify identity again before reading pixels from a DHCP address.
+            info=cn.get(url,'/wda/device/info')
+            if info.get('uuid')!=setting['fingerprint']:raise RuntimeError('预览设备指纹改变，已停止读取。')
+            value=cn.get(url,'/screenshot',timeout=5,max_bytes=8*1024*1024)
+            if not isinstance(value,str):raise RuntimeError('截图接口未返回图像。')
+            data=base64.b64decode(value,validate=True)
+            if len(data)>MAX_FRAME:raise RuntimeError('预览图像过大。')
+            with Image.open(io.BytesIO(data)) as raw:
+                if raw.width*raw.height>12_000_000:raise RuntimeError('预览图像尺寸过大。')
+                with self.lock:size=self.target_size
+                image=ImageOps.exif_transpose(raw).convert('RGB');image.thumbnail(size,Image.Resampling.BILINEAR)
+            self.publish(revision,image=image,status='兼容预览 · 每 2 秒更新 · 只读')
+            while self.current(revision) and time.monotonic()-started<2:self.wake.wait(.2);self.wake.clear()
     def _stream(self,udid,revision):
         import device_manager as dm
         vendor,request=self.resolver(udid)

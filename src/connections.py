@@ -89,12 +89,12 @@ def validate_url(url):
     except (ValueError,TypeError):raise ValueError('请输入可信局域网或 Tailscale 的 WDA 根地址，例如 http://100.64.1.2:8100；不支持公网地址、账号密码或 URL 路径。') from None
     return url.rstrip('/')
 
-def get(url,path,timeout=4):
+def get(url,path,timeout=4,max_bytes=2*1024*1024):
     validate_url(url)
     op=build_opener(ProxyHandler({}),NoRedirect())
     with op.open(Request(url+path),timeout=timeout) as response:
-        raw=response.read(2*1024*1024+1)
-        if len(raw)>2*1024*1024:raise RuntimeError('WDA 返回内容过大。')
+        raw=response.read(max_bytes+1)
+        if len(raw)>max_bytes:raise RuntimeError('WDA 返回内容过大。')
         result=json.loads(raw)
     if not isinstance(result,dict):raise RuntimeError('地址没有返回 WDA JSON 对象。')
     return result.get('value',result)
@@ -272,7 +272,15 @@ def prepare_wireless_xctestrun(derived,runtime,bundle,port,mjpeg):
 def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
     from runner import Halt
     trace={'stage':'preflight','candidates':[]}
-    try:return _ensure_wifi(udid,notify,stop,setting_override,trace)
+    try:
+        url=_ensure_wifi(udid,notify,stop,setting_override,trace)
+        # Preserve candidate failures even if a later development tunnel succeeds.
+        try:
+            import device_manager as dm
+            from app_paths import APP_VERSION
+            dm.write_json(dm.device_dir(udid)/'connection-attempt.json',{**trace,'selected_url':url,'timestamp':time.time(),'app_version':APP_VERSION})
+        except OSError:pass
+        return url
     except Halt:
         stop_device(udid);raise
     except Exception as exc:
@@ -326,7 +334,8 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
                 info=checked(cached['url'],setting['fingerprint'])
                 dm.write_json(runtime/'network-runtime.json',{**info,'preview_url':cached.get('preview_url','')})
                 return info['url']
-            except (OSError,ValueError,KeyError):pass
+            except (OSError,ValueError,KeyError) as exc:
+                trace.setdefault('endpoint_errors',[]).append({'url':cached['url'],'error':type(exc).__name__+': '+str(exc)[:1000]})
     try:
         if not url:raise OSError('开发隧道尚未报告地址，交由 XCTest 建立开发连接。')
         info=inspect(url)

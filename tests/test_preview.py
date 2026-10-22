@@ -1,4 +1,4 @@
-import io,json,sys,tempfile,threading,time,unittest
+import base64,io,json,sys,tempfile,threading,time,unittest
 from pathlib import Path
 from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path('src').resolve()))
@@ -60,6 +60,28 @@ class PreviewIsolation(unittest.TestCase):
  def test_close_terminates_only_the_preview_child(self):
   process=Mock();self.source.process=process
   with patch('runtime_manager.stop_all') as stop:self.source.close();process.terminate.assert_called_once();stop.assert_not_called()
+
+class SnapshotPreview(unittest.TestCase):
+ def source(self):
+  source=preview.PreviewSource.__new__(preview.PreviewSource)
+  source.lock=threading.Lock();source.target_size=(200,300);source.wake=threading.Event()
+  source.current=Mock(side_effect=[True,False,False]);source.publish=Mock()
+  return source
+ def test_missing_mjpeg_can_read_pixels_without_creating_or_changing_a_session(self):
+  import connections as cn
+  out=io.BytesIO();Image.new('RGB',(400,600),'blue').save(out,format='PNG')
+  source=self.source();setting={'mode':'remote','wda_url':'http://192.168.1.4:8100','fingerprint':'pin'}
+  with patch.object(cn,'load',return_value=setting),patch.object(cn,'checked') as checked,patch.object(cn,'get',side_effect=[{'uuid':'pin'},base64.b64encode(out.getvalue()).decode()]) as get:
+   source._snapshot_stream('a'*40,1)
+   checked.assert_called_once_with(setting['wda_url'],'pin')
+   self.assertEqual([c.args[1] for c in get.call_args_list],['/wda/device/info','/screenshot'])
+   self.assertEqual(source.publish.call_args.kwargs['image'].size,(200,300))
+ def test_dhcp_identity_change_never_reads_another_phones_pixels(self):
+  import connections as cn
+  source=self.source()
+  with patch.object(cn,'load',return_value={'mode':'remote','wda_url':'http://192.168.1.4:8100','fingerprint':'pin'}),patch.object(cn,'checked'),patch.object(cn,'get',return_value={'uuid':'other'}) as get:
+   with self.assertRaisesRegex(RuntimeError,'指纹'):source._snapshot_stream('a'*40,1)
+   get.assert_called_once();source.publish.assert_not_called()
 
 class PreviewDisplayIsolation(unittest.TestCase):
  def test_render_failure_keeps_preview_poll_alive(self):

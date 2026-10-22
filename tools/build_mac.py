@@ -35,7 +35,8 @@ def main():
          '--add-data',f'{license_source}:licenses','--add-data',f'{SOURCE / "resources"}:resources',SOURCE/'app_entry.py'],cwd=ROOT)
     app=ROOT/'dist/Instagram 控制台.app';info=app/'Contents/Info.plist'
     version=re.search(r"^APP_VERSION='([^']+)'",(SOURCE/'app_paths.py').read_text(),re.M)[1]
-    values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString=version,CFBundleVersion=version,NSHighResolutionCapable=True)
+    values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString=version,CFBundleVersion=version,NSHighResolutionCapable=True,
+        NSLocalNetworkUsageDescription='连接你选择并验证的局域网 iPhone，读取设备状态和手机预览，并运行你启动的控制任务。')
     info.write_bytes(plistlib.dumps(values));run(['/usr/bin/codesign','--force','--deep','--sign','-',app])
     print(app)
 if __name__=='__main__':main()

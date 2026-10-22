@@ -139,6 +139,15 @@ class LocalWirelessStartup(unittest.TestCase):
   for target,pin in [('other','pin'),(self.udid,'other')]:
    dm.write_json(dm.device_dir('a'*32)/'connection.json',{'merged_into':target,'previous_connection':{'mode':'remote','fingerprint':pin,'wda_url':'http://192.168.1.4:8100'}})
    self.assertEqual(cn.saved_wifi_endpoints(self.udid,'pin'),[])
+ def test_lan_policy_failure_is_preserved_when_tunnel_preflight_succeeds(self):
+  lan='http://192.168.1.4:18120';tunnel='http://[fd00::1]:18120'
+  dm.write_json(self.runtime/'network-runtime.json',{'url':lan})
+  with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',side_effect=[OSError(65,'No route to host'),{'url':tunnel,'fingerprint':'pin','ios':'18.1'}]):
+   self.assertEqual(cn.ensure_wifi(self.udid,setting_override={'mode':'wifi','fingerprint':'pin'}),tunnel)
+  evidence=json.loads((self.runtime/'connection-attempt.json').read_text())
+  self.assertEqual(evidence['selected_url'],tunnel)
+  self.assertEqual(evidence['endpoint_errors'][0]['url'],lan)
+  self.assertIn('No route to host',evidence['endpoint_errors'][0]['error'])
  def test_bound_fingerprint_mismatch_stops_without_launching_other_runner(self):
   with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',return_value={'fingerprint':'other'}),patch.object(cn.subprocess,'run',return_value=Mock(returncode=0,stdout='')),patch.object(cn.subprocess,'Popen') as launch:
    with self.assertRaisesRegex(RuntimeError,'指纹'):cn.ensure_wifi(self.udid,setting_override={'mode':'wifi','fingerprint':'pin'})
