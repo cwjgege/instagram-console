@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.5**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.6**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.5 无线测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.5/Instagram-Console-1.2.5-AppleSilicon.dmg)
+[下载 v1.2.6 无线启动修复测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.6/Instagram-Console-1.2.6-AppleSilicon.dmg)
 
-[查看 v1.2.5 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.5)
+[查看 v1.2.6 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.6)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -182,3 +182,14 @@ API Key 只存于当前应用进程；使用模型服务会将采样内容发送
 “添加无线设备”可自动发现当前局域网已运行的 WDA，或导入原 Mac 导出的 JSON 连接配置。发现后选择设备即可自动填写名称、系统和服务地址。可导出单台或全部已验证无线连接；导入时验证设备指纹，IP 改变会尝试在局域网重新寻找，失败保留原配置。新 Mac 无需原签名证书即可连接已运行服务。
 
 发现范围为活动 LAN 接口的当前 /24 与常用端口 18100、8100，以及已保存地址。不依赖原 Mac 的配对记录；未获取 UDID 时使用明确标注的指纹连接标识。自定义端口、其他网段和跨地区连接可用配置导入。文件不包含证书、私钥、API 密钥或浏览规则。此功能不负责手机重启后的 WDA 启动与签名续期。
+
+
+## 1.2.6 无线启动修复测试版
+
+将此前 `v1.2.5-background.1` 的后台启动修复整合到独立版本，避免多个不同的 1.2.5 安装包难以区分。使用 `devicectl --no-activate` 启动已有签名组件，不再根据延迟日志打开手机设置；分别报告锁屏、自动化授权超时和 XCTest 10300。窗口标题、启动日志和连接诊断记录版本；本机启动失败诊断还记录启动方法。旧实例运行时，新版本提示先退出旧实例再打开。
+
+远程 WDA 端口拒绝连接时，提示核对 IP、恢复 WDA，以及从本机已配对签名的原手机档案选择“本地 Wi-Fi”验证启动。远程已有 WDA 模式仍只连接现有服务，不自动启动、重新签名或覆盖其他手机档案。
+
+安装：完全退出所有旧版控制台，将 DMG 或 ZIP 中的“Instagram 控制台.app”替换到 Applications 后打开。确认主窗口显示 **1.2.6**。保留原配置和签名，不需要因为本次故障重复创建证书。选择原手机档案的“连接方式 → 本地 Wi-Fi”，解锁手机并完成手机上的密码或自动化提示，再验证。如果提示已绑定到其他档案，使用已有网络档案并刷新连接；不要重复添加同一手机。
+
+验证：260 项自动检查通过，覆盖后台启动参数、延迟启动日志不打开设置、三种初始化失败、端口拒绝后的恢复提示及设备隔离。发布包另做签名完整性与独立运行依赖检查。尚未完成问题远程 Mac / iPhone 上安装 1.2.6 后的实机复验；这是供继续验证的预发布版本，不代表所有 iOS / Xcode 组合均已解决。

@@ -3,7 +3,7 @@ import copy,json,queue,threading,time,subprocess
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
-from app_paths import DATA,load_config
+from app_paths import DATA,APP_VERSION,load_config
 import device_manager as dm
 import ui_theme as ui
 import connections
@@ -48,7 +48,7 @@ class Fleet:
         self.on_device_selected=self.selected_device_ready;self.signature_notices=set()
         self.pending_starts={};self.pending_all=None;self.last_refresh=None;self._view_cache={}
         self.next_network_check=time.monotonic()+15
-        ui.apply(root);root.title('Instagram 控制台 · 设备工作区')
+        ui.apply(root);root.title(f'Instagram 控制台 {APP_VERSION} · 设备工作区')
         root.geometry(f'{min(1260,root.winfo_screenwidth()-60)}x{min(780,root.winfo_screenheight()-100)}');root.minsize(1000,640)
         body=ttk.Frame(root,padding=24,style='Workspace.TFrame');body.pack(fill='both',expand=True)
         header=ttk.Frame(body,style='Workspace.TFrame');header.pack(fill='x',pady=(0,18))

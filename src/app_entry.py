@@ -38,13 +38,14 @@ def main():
     DATA.mkdir(parents=True,exist_ok=True)
     log=(DATA/'console.log').open('a',buffering=1)
     sys.stdout=sys.stderr=log
+    print(f'Instagram Console {APP_VERSION} · {sys.executable}',flush=True)
     lock=(DATA/'application.lock').open('a')
     import tkinter as tk
     from tkinter import messagebox
     root=tk.Tk()
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:
-        root.withdraw();messagebox.showinfo('Instagram 控制台','应用已在运行，请使用已打开的窗口。',parent=root)
+        root.withdraw();messagebox.showinfo('Instagram 控制台 '+APP_VERSION,'控制台已有实例在运行。\n升级后请先完全退出正在运行的控制台，再打开 '+APP_VERSION+'。直接打开新安装包不会切换已运行的旧版。',parent=root)
         root.destroy();return
     try:
         load_config()

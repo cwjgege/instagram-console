@@ -43,6 +43,13 @@ class Connections(unittest.TestCase):
   phone={'udid':'b'*40,'paired':True,'developer':True}
   with patch.object(cn,'discover',return_value=[phone]),patch.object(cn,'load',side_effect=lambda u:{'mode':'remote','wda_url':'http://100.64.1.2:8100','fingerprint':'pin'} if u==self.udid else {'mode':'usb'}),patch.object(cn,'checked',side_effect=OSError('offline')):
    found=cn.fleet_devices([{'device_udid':self.udid},{'device_udid':'b'*40}]);self.assertEqual(found[-1],phone);self.assertFalse(found[0]['paired']);self.assertIn('offline',found[0]['connection_error'])
+ def test_refused_remote_explains_local_recovery_without_starting_a_phone(self):
+  from urllib.error import URLError
+  cfg={'device_udid':self.udid}
+  setting={'mode':'remote','wda_url':'http://192.168.31.113:18100','fingerprint':'pin'}
+  with patch.object(cn,'checked',side_effect=URLError(ConnectionRefusedError(61,'Connection refused'))),patch.object(cn.subprocess,'Popen') as launch:
+   result=cn.remote_device(cfg,setting)
+   self.assertFalse(result['paired']);self.assertIn('本地 Wi-Fi',result['connection_error']);self.assertIn('拒绝连接',result['connection_error']);launch.assert_not_called()
  def test_network_preview_uses_network_host(self):
   import preview
   with patch.object(cn,'load',return_value={'mode':'remote','preview_url':'http://100.64.1.2:9100'}),patch.object(dm,'prepare_vendor',return_value=Path('/vendor')):
@@ -102,6 +109,8 @@ class LocalWirelessStartup(unittest.TestCase):
   with patch.object(cn.subprocess,'run',return_value=route) as run:
    path=cn.record_connection_failure(self.udid,trace,RuntimeError('unreachable'))
    evidence=json.loads(path.read_text());self.assertEqual(evidence['stage'],'wda_endpoint');self.assertEqual(evidence['routes'][0]['interface'],'en0');run.assert_called_once()
+   from app_paths import APP_VERSION
+   self.assertEqual(evidence['app_version'],APP_VERSION)
    self.assertNotIn('other',evidence['routes'][0]);self.assertEqual(run.call_args.kwargs['timeout'],2)
  def test_diagnostic_write_failure_preserves_original_error(self):
   with patch.object(cn,'_ensure_wifi',side_effect=RuntimeError('original connection error')),patch.object(cn,'record_connection_failure',side_effect=OSError('disk full')):
@@ -133,6 +142,15 @@ class LocalWirelessStartup(unittest.TestCase):
      with self.assertRaisesRegex(RuntimeError,expected):cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'})
     self.assertFalse(any('com.apple.Preferences' in call.args[0] for call in run.call_args_list))
     evidence=json.loads((self.runtime/'connection-diagnostic.json').read_text());self.assertEqual(evidence['stage'],stage)
+
+ def test_launch_banner_does_not_trigger_settings_while_runner_is_starting(self):
+  process=Mock();process.poll.return_value=None
+  info={'fingerprint':'pin','name':'Test','ios':'26.6','bundle':'com.igconsole.test.xctrunner'}
+  def launch(*args,**kwargs):
+   kwargs['stdout'].write(b'Launched application with test bundle identifier.\n');kwargs['stdout'].flush();return process
+  with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',side_effect=[OSError('starting'),info]),patch.object(cn.subprocess,'Popen',side_effect=launch),patch.object(cn.subprocess,'run') as run,patch.object(dm,'child_env',return_value={}),patch.object(dm,'xcode_directory',return_value=Path('/Xcode')):
+   self.assertEqual(cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'}),'http://[fd00::1]:18120')
+   run.assert_not_called()
 
 class WdaProtocol(unittest.TestCase):
  def test_read_only_verification_over_real_http_and_redirect_rejection(self):

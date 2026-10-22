@@ -7,13 +7,14 @@ import connections as cn
 import network_profiles as np
 import device_manager as dm
 import ui_theme as ui
+from app_paths import APP_VERSION
 
 class ConnectionWindow:
     def __init__(self,fleet,udid=None):
         self.fleet=fleet;self.udid=udid;self.busy=False;self.events=queue.Queue();self.devices=[];self.stop_event=threading.Event()
         if not hasattr(fleet,'connection_windows'):fleet.connection_windows=[]
         fleet.connection_windows.append(self)
-        self.window=tk.Toplevel(fleet.root);self.window.title('连接方式');self.window.geometry('780x700');self.window.minsize(620,540)
+        self.window=tk.Toplevel(fleet.root);self.window.title(f'连接方式 · {APP_VERSION}');self.window.geometry('780x700');self.window.minsize(620,540)
         footer=ttk.Frame(self.window,padding=18);footer.pack(side='bottom',fill='x')
         self.status=tk.StringVar(value='发现局域网中已运行的 WDA，或导入原 Mac 导出的连接文件。')
         self.status_label=ttk.Label(footer,textvariable=self.status,wraplength=720);self.status_label.pack(fill='x',pady=(0,10))

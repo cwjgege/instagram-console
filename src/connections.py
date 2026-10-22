@@ -101,7 +101,11 @@ def remote_device(cfg,setting):
     try:
         checked(setting['wda_url'],setting.get('fingerprint'))
         return {**row,'paired':True,'developer':True}
-    except Exception as exc:return {**row,'paired':False,'developer':False,'connection_error':type(exc).__name__+': '+str(exc)[:1000]}
+    except Exception as exc:
+        message=type(exc).__name__+': '+str(exc)[:1000]
+        if isinstance(exc,ConnectionRefusedError) or isinstance(getattr(exc,'reason',None),ConnectionRefusedError):
+            message+='\n保存地址的控制端口拒绝连接，请核对手机当前 IP 并恢复 WDA。若手机已在本机签名配对，请从原来的手机档案选择“本地 Wi-Fi”验证启动；“远程已有 WDA”不会启动组件。'
+        return {**row,'paired':False,'developer':False,'connection_error':message}
 
 def probe_remotes(profiles):
     """Read-only refresh of saved WDA endpoints; never discover, start or install anything."""
@@ -151,7 +155,8 @@ def stop_all():
 def record_connection_failure(udid,trace,error):
     """Keep bounded transport evidence without collecting app contents or proxy credentials."""
     import device_manager as dm
-    evidence={**trace,'timestamp':time.time(),'error':str(error)[:2000],'routes':[]}
+    from app_paths import APP_VERSION
+    evidence={**trace,'app_version':APP_VERSION,'timestamp':time.time(),'error':str(error)[:2000],'routes':[]}
     for url in list(dict.fromkeys(trace.get('candidates',[])))[-3:]:
         try:
             validate_url(url);host=urlsplit(url).hostname
@@ -239,7 +244,7 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
     launch_env={'USE_PORT':str(port),'MJPEG_SERVER_PORT':str(mjpeg),'WDA_PRODUCT_BUNDLE_IDENTIFIER':bundle,
                 'DYLD_FRAMEWORK_PATH':'/System/Developer/Library/Frameworks','DYLD_LIBRARY_PATH':'/System/Developer/usr/lib'}
     with _LOCK:
-        trace['stage']='preinstalled_startup'
+        trace.update(stage='preinstalled_startup',startup_method='devicectl-no-activate')
         process=_PROCESSES.get(udid)
         log_file=runtime/'wireless-wda.log'
         offset=log_file.stat().st_size if log_file.exists() else 0
@@ -247,7 +252,7 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
             notify('正在后台启动已安装控制组件；如手机要求密码或自动化验证，请在手机上完成，不需要重新签名。')
             with log_file.open('ab') as log:
                 process=subprocess.Popen([str(dm.xcode_directory()/'usr/bin/devicectl'),'device','process','launch','--device',udid,'--timeout','120','--console','--no-activate','--terminate-existing','--environment-variables',json.dumps(launch_env),bundle],env=dm.child_env(),stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-            process._igconsole_log_offset=offset;process._igconsole_backgrounded=False
+            process._igconsole_log_offset=offset
             _PROCESSES[udid]=process
         else:offset=getattr(process,'_igconsole_log_offset',offset)
     deadline=time.monotonic()+100

@@ -1,5 +1,5 @@
 """Build on Apple Silicon with Python 3.14/Tk 9 and Node installed locally."""
-import json,os,platform,plistlib,shutil,subprocess,sys,tarfile
+import json,os,platform,plistlib,shutil,subprocess,sys,tarfile,re
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 BUILD=ROOT/'build';STAGE=BUILD/'stage';SOURCE=ROOT/'src';VENDOR=STAGE/'vendor'
@@ -34,7 +34,8 @@ def main():
          '--add-data',f'{STAGE / "default-config.json"}:.','--add-data',f'{archive}:.',
          '--add-data',f'{license_source}:licenses','--add-data',f'{SOURCE / "resources"}:resources',SOURCE/'app_entry.py'],cwd=ROOT)
     app=ROOT/'dist/Instagram 控制台.app';info=app/'Contents/Info.plist'
-    values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString='1.2.5',CFBundleVersion='125',NSHighResolutionCapable=True)
+    version=re.search(r"^APP_VERSION='([^']+)'",(SOURCE/'app_paths.py').read_text(),re.M)[1]
+    values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString=version,CFBundleVersion=version,NSHighResolutionCapable=True)
     info.write_bytes(plistlib.dumps(values));run(['/usr/bin/codesign','--force','--deep','--sign','-',app])
     print(app)
 if __name__=='__main__':main()
