@@ -244,9 +244,9 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
         log_file=runtime/'wireless-wda.log'
         offset=log_file.stat().st_size if log_file.exists() else 0
         if process is None or process.poll() is not None:
-            notify('正在直接启动已安装控制组件，不重新安装或签名；随后会短暂打开手机设置…')
+            notify('正在后台启动已安装控制组件；如手机要求密码或自动化验证，请在手机上完成，不需要重新签名。')
             with log_file.open('ab') as log:
-                process=subprocess.Popen([str(dm.xcode_directory()/'usr/bin/devicectl'),'device','process','launch','--device',udid,'--timeout','120','--console','--terminate-existing','--environment-variables',json.dumps(launch_env),bundle],env=dm.child_env(),stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+                process=subprocess.Popen([str(dm.xcode_directory()/'usr/bin/devicectl'),'device','process','launch','--device',udid,'--timeout','120','--console','--no-activate','--terminate-existing','--environment-variables',json.dumps(launch_env),bundle],env=dm.child_env(),stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             process._igconsole_log_offset=offset;process._igconsole_backgrounded=False
             _PROCESSES[udid]=process
         else:offset=getattr(process,'_igconsole_log_offset',offset)
@@ -255,13 +255,10 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
         check()
         with log_file.open('rb') as source:
             source.seek(offset);recent=source.read(2*1024*1024).decode(errors='replace')
-        # A preinstalled runner starts its server once it moves to the background.
-        if 'Launched application' in recent and not getattr(process,'_igconsole_backgrounded',False):
-            trace['stage']='background_runner'
-            result=subprocess.run([str(dm.xcode_directory()/'usr/bin/devicectl'),'device','process','launch','--device',udid,'--timeout','15','com.apple.Preferences'],env=dm.child_env(),capture_output=True,text=True,timeout=20)
-            with log_file.open('a') as log:log.write('\nBackground transition:\n'+(result.stdout+result.stderr)[-12000:]+'\n')
-            if result.returncode:raise RuntimeError('组件已启动，但切换到后台失败，请保持手机解锁。详情见 wireless-wda.log。')
-            process._igconsole_backgrounded=True
+        # Start without activation rather than asking XCTest to press Home. With
+        # newer developer images that press can time out; redirected launch output
+        # can also arrive only after the runner has already exited. Never launch
+        # Settings in response to that late output or interrupt phone authentication.
         try:
             # devicectl owns the startup connection. Do not concurrently query CoreDevice
             # while it enables the developer image; use the runner's fresh LAN URL instead.
@@ -281,6 +278,15 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
             dm.write_json(runtime/'network-runtime.json',{**info,'preview_url':url.rsplit(':',1)[0]+':'+str(mjpeg)});return url
         except (OSError,ValueError):pass
         if process.poll() is not None:
+            if re.search(r'for reason: Locked|BSErrorCodeDescription\s*=\s*Locked',recent):
+                trace['stage']='device_locked'
+                raise RuntimeError('iOS 拒绝启动组件：手机处于锁定状态。请在手机输入锁屏密码、保持亮屏后重新验证；不需要重装或创建证书。')
+            if 'Failed to background test runner' in recent:
+                trace['stage']='background_runner_failed'
+                raise RuntimeError('iOS 测试组件未能进入后台（XCTest 10300）。当前后台启动方式未通过本机开发环境验证；请保留日志，并通过 USB 做开发环境对照，不要重复创建证书。')
+            if 'Timed out while enabling automation mode' in recent:
+                trace['stage']='automation_authorization'
+                raise RuntimeError('iOS 启用自动化超时。即使“UI 自动化”开关已开启，仍需检查手机上的密码或自动化验证提示；请完成后重试。详情见 wireless-wda.log。')
             if 'is not installed' in recent:
                 trace['stage']='component_missing'
                 raise RuntimeError('手机未安装本机签名记录对应的控制组件（'+bundle+'）。请在“连接与签名”恢复该组件；若换过签名团队，需要核对实际安装标识。无需因此重复创建证书。')

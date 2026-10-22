@@ -151,6 +151,12 @@ API Key 只存于当前应用进程；使用模型服务会将采样内容发送
 本轮在 iPhone 8 Plus / iOS 16.7.16 完成安装与重新验证；控制服务中断测试与启停结果见随包说明。物理 USB 拔插及其他 Mac 尚需另行验证。
 
 
+## 1.2.5 后台启动修复测试包
+
+[下载后台启动修复测试包（Apple Silicon ZIP）](https://github.com/cwjgege/instagram-console/releases/download/v1.2.5-background.1/Instagram-Console-1.2.5-background-test.zip)
+
+本测试包使用 `devicectl --no-activate` 启动现有 WDA，移除根据延迟日志打开设置的操作，并区分手机锁定、自动化启用超时和 XCTest 10300。258 项自动检查通过；问题设备上的修复后实机验证尚未完成，不代表已解决所有 iOS 26 / Xcode 组合。应用内部版本仍为 1.2.5，以此独立测试标签区分。
+
 ## 1.2.5 无线连接测试版
 
 保留原有 USB 安装和运行方式，设备工作区新增“添加无线设备”和每台设备的“连接方式”。连接配置独立保存，不覆盖浏览参数。

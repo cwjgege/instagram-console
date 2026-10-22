@@ -78,6 +78,7 @@ class LocalWirelessStartup(unittest.TestCase):
   with patch.object(dm,'coredevice',side_effect=[self.details('fd00::1'),AssertionError('concurrent CoreDevice query')]),patch.object(cn,'inspect',side_effect=[OSError('not ready'),{'fingerprint':'pin','name':'Test','ios':'18.1','bundle':'com.igconsole.test.xctrunner'}]),patch.object(cn.subprocess,'Popen',return_value=process) as launch,patch.object(dm,'child_env',return_value={}),patch.object(dm,'prepare_vendor',return_value=Path('/vendor')),patch.object(dm,'xcode_directory',return_value=Path('/Xcode')):
    url=cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'});self.assertEqual(url,'http://[fd00::1]:18120')
    args=launch.call_args.args[0];self.assertIn('devicectl',args[0]);self.assertIn('com.igconsole.test.xctrunner',args);self.assertIn('--environment-variables',args);self.assertNotIn('test-without-building',args);self.assertEqual(launch.call_args.kwargs['stdin'],cn.subprocess.DEVNULL)
+   self.assertIn('--no-activate',args)
    runtime=json.loads((self.runtime/'network-runtime.json').read_text());self.assertEqual(runtime['preview_url'],'http://[fd00::1]:18121')
  def test_resume_checks_cached_lan_address_before_starting_xctest(self):
   url='http://192.168.1.4:18120';dm.write_json(self.runtime/'network-runtime.json',{'url':url,'preview_url':'http://192.168.1.4:18121'})
@@ -118,6 +119,20 @@ class LocalWirelessStartup(unittest.TestCase):
   with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',side_effect=OSError('not ready')),patch.object(cn.subprocess,'Popen',side_effect=launch),patch.object(cn.subprocess,'run',return_value=Mock(returncode=0,stdout='')),patch.object(dm,'child_env',return_value={}),patch.object(dm,'xcode_directory',return_value=Path('/Xcode')):
    with self.assertRaisesRegex(RuntimeError,'未安装本机签名记录'):cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'})
   evidence=json.loads((self.runtime/'connection-diagnostic.json').read_text());self.assertEqual(evidence['stage'],'component_missing')
+
+ def test_initialization_errors_are_specific_and_never_open_settings_after_exit(self):
+  cases=[('BSErrorCodeDescription = Locked','device_locked','锁定状态'),
+         ('Timed out while enabling automation mode.','automation_authorization','启用自动化超时'),
+         ('Failed to background test runner within 30.0s.','background_runner_failed','XCTest 10300')]
+  for message,stage,expected in cases:
+   with self.subTest(stage=stage):
+    process=Mock();process.poll.return_value=1
+    def launch(*args,**kwargs):
+     kwargs['stdout'].write((message+'\nLaunched application with test bundle identifier.\n').encode());kwargs['stdout'].flush();return process
+    with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',side_effect=OSError('not ready')),patch.object(cn.subprocess,'Popen',side_effect=launch),patch.object(cn.subprocess,'run',return_value=Mock(returncode=0,stdout='')) as run,patch.object(dm,'child_env',return_value={}),patch.object(dm,'xcode_directory',return_value=Path('/Xcode')):
+     with self.assertRaisesRegex(RuntimeError,expected):cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'})
+    self.assertFalse(any('com.apple.Preferences' in call.args[0] for call in run.call_args_list))
+    evidence=json.loads((self.runtime/'connection-diagnostic.json').read_text());self.assertEqual(evidence['stage'],stage)
 
 class WdaProtocol(unittest.TestCase):
  def test_read_only_verification_over_real_http_and_redirect_rejection(self):
