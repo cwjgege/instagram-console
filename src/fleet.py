@@ -35,6 +35,7 @@ class DeviceStore:
             try:
                 cfg=json.loads(path.read_text());self.path(cfg['device_udid'])
                 if path.parent.name!=cfg['device_udid']:continue
+                if connections.merged_target(cfg['device_udid']):continue
                 cfg['runtime_dir']=str(path.parent);cfg['managed_device']=True;rows.append(cfg)
             except (OSError,ValueError,KeyError):
                 try:cfg=self.make({'udid':path.parent.name,'name':'配置文件异常'});cfg['_load_error']='配置文件无法读取，请检查该设备 config.json。';rows.append(cfg)

@@ -50,6 +50,39 @@ class Connections(unittest.TestCase):
   with patch.object(cn,'checked',side_effect=URLError(ConnectionRefusedError(61,'Connection refused'))),patch.object(cn.subprocess,'Popen') as launch:
    result=cn.remote_device(cfg,setting)
    self.assertFalse(result['paired']);self.assertIn('本地 Wi-Fi',result['connection_error']);self.assertIn('拒绝连接',result['connection_error']);launch.assert_not_called()
+ def discovery_alias(self):
+  import hashlib
+  alias=hashlib.sha256(b'phone-one').hexdigest()[:32]
+  setting={'mode':'remote','identifier_kind':'wda','fingerprint':'phone-one','wda_url':'http://192.168.31.113:18100'}
+  cn.save(alias,setting);dm.write_json(dm.device_dir(alias)/'config.json',{'device_udid':alias,'sentinel':'keep browsing settings'})
+  return alias,setting
+ def test_verified_local_save_merges_only_matching_idle_discovery_alias_and_keeps_backup(self):
+  from contextlib import nullcontext
+  alias,old=self.discovery_alias();setting={'mode':'wifi','identifier_kind':'udid','fingerprint':'phone-one'}
+  dm.write_json(dm.device_dir(self.udid)/'config.json',{'device_udid':self.udid})
+  with patch('app_paths.lock_device',return_value=nullcontext()) as lock:cn.save(self.udid,setting,merge_discovered_alias=True)
+  lock.assert_called_once_with(alias);self.assertEqual(cn.load(self.udid),setting)
+  archived=json.loads((dm.device_dir(alias)/'connection.json').read_text())
+  self.assertEqual(archived['previous_connection'],old);self.assertEqual(cn.merged_target(alias),self.udid)
+  self.assertEqual(json.loads((dm.device_dir(alias)/'config.json').read_text())['sentinel'],'keep browsing settings')
+  with self.assertRaisesRegex(ValueError,'已合并'):cn.load(alias)
+ def test_active_discovery_alias_is_not_merged(self):
+  alias,old=self.discovery_alias()
+  with patch('app_paths.lock_device',side_effect=RuntimeError('正在运行')):
+   with self.assertRaisesRegex(RuntimeError,'正在运行'):cn.save(self.udid,{'mode':'wifi','fingerprint':'phone-one'},merge_discovered_alias=True)
+  self.assertEqual(cn.load(alias),old);self.assertEqual(cn.load(self.udid),{'mode':'usb'})
+ def test_alias_merge_rolls_back_all_bindings_when_archive_write_fails(self):
+  from contextlib import nullcontext
+  alias,old=self.discovery_alias();write=dm.write_json
+  def fail(path,value):
+   if Path(path).parent.name==alias:raise OSError('disk full')
+   return write(path,value)
+  with patch('app_paths.lock_device',return_value=nullcontext()),patch.object(dm,'write_json',side_effect=fail):
+   with self.assertRaisesRegex(OSError,'disk full'):cn.save(self.udid,{'mode':'wifi','fingerprint':'phone-one'},merge_discovered_alias=True)
+  self.assertEqual(cn.load(alias),old);self.assertEqual(cn.load(self.udid),{'mode':'usb'})
+ def test_duplicate_real_device_binding_remains_blocked(self):
+  cn.save('b'*40,{'mode':'remote','identifier_kind':'udid','fingerprint':'phone-one','wda_url':'http://192.168.31.113:8100'})
+  with self.assertRaisesRegex(RuntimeError,'已经绑定'):cn.save(self.udid,{'mode':'wifi','fingerprint':'phone-one'},merge_discovered_alias=True)
  def test_network_preview_uses_network_host(self):
   import preview
   with patch.object(cn,'load',return_value={'mode':'remote','preview_url':'http://100.64.1.2:9100'}),patch.object(dm,'prepare_vendor',return_value=Path('/vendor')):
@@ -76,16 +109,18 @@ class LocalWirelessStartup(unittest.TestCase):
   self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name);self.scope=patch.object(dm,'DATA',self.root);self.scope.start();self.udid='c'*40
   self.runtime=dm.device_dir(self.udid);self.products=self.runtime/'DerivedData/Build/Products';self.products.mkdir(parents=True)
   import plistlib
-  (self.products/'Runner.xctestrun').write_bytes(plistlib.dumps({'Runner':{'TestBundlePath':'bundle','EnvironmentVariables':{'USE_PORT':'18120','MJPEG_SERVER_PORT':'18121'}}}))
+  host=self.products/'Debug-iphoneos/WebDriverAgentRunner-Runner.app';test=host/'PlugIns/WebDriverAgentRunner.xctest';test.mkdir(parents=True)
+  (host/'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'com.igconsole.test.xctrunner'}))
+  (self.products/'Runner.xctestrun').write_bytes(plistlib.dumps({'Runner':{'TestHostBundleIdentifier':'com.igconsole.test.xctrunner','TestHostPath':'__TESTROOT__/Debug-iphoneos/WebDriverAgentRunner-Runner.app','TestBundlePath':'__TESTHOST__/PlugIns/WebDriverAgentRunner.xctest','EnvironmentVariables':{'USE_PORT':'18120','MJPEG_SERVER_PORT':'18121'}}}))
   dm.write_json(self.runtime/'signing.json',{'expires_at':'2030-01-01T00:00:00+00:00','controller':'modern','bundle_id':'com.igconsole.test.xctrunner'})
  def tearDown(self):cn._PROCESSES.clear();self.scope.stop();self.tmp.cleanup()
  def details(self,ip):return {'hardwareProperties':{'udid':self.udid},'connectionProperties':{'pairingState':'paired','tunnelIPAddress':ip},'deviceProperties':{'developerModeStatus':'enabled','osVersionNumber':'18.1'}}
- def test_starts_preinstalled_runner_and_honors_compiled_ports(self):
+ def test_starts_signed_xctest_without_building_and_honors_compiled_ports(self):
   process=Mock();process.poll.return_value=None
   with patch.object(dm,'coredevice',side_effect=[self.details('fd00::1'),AssertionError('concurrent CoreDevice query')]),patch.object(cn,'inspect',side_effect=[OSError('not ready'),{'fingerprint':'pin','name':'Test','ios':'18.1','bundle':'com.igconsole.test.xctrunner'}]),patch.object(cn.subprocess,'Popen',return_value=process) as launch,patch.object(dm,'child_env',return_value={}),patch.object(dm,'prepare_vendor',return_value=Path('/vendor')),patch.object(dm,'xcode_directory',return_value=Path('/Xcode')):
    url=cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'});self.assertEqual(url,'http://[fd00::1]:18120')
-   args=launch.call_args.args[0];self.assertIn('devicectl',args[0]);self.assertIn('com.igconsole.test.xctrunner',args);self.assertIn('--environment-variables',args);self.assertNotIn('test-without-building',args);self.assertEqual(launch.call_args.kwargs['stdin'],cn.subprocess.DEVNULL)
-   self.assertIn('--no-activate',args)
+   args=launch.call_args.args[0];self.assertIn('xcodebuild',args[0]);self.assertIn('test-without-building',args);self.assertIn('-xctestrun',args);self.assertNotIn('build-for-testing',args);self.assertEqual(launch.call_args.kwargs['stdin'],cn.subprocess.DEVNULL)
+   self.assertNotIn('-allowProvisioningUpdates',args);self.assertEqual(args[args.index('-destination')+1],'id='+self.udid)
    runtime=json.loads((self.runtime/'network-runtime.json').read_text());self.assertEqual(runtime['preview_url'],'http://[fd00::1]:18121')
  def test_resume_checks_cached_lan_address_before_starting_xctest(self):
   url='http://192.168.1.4:18120';dm.write_json(self.runtime/'network-runtime.json',{'url':url,'preview_url':'http://192.168.1.4:18121'})
@@ -151,6 +186,49 @@ class LocalWirelessStartup(unittest.TestCase):
   with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',side_effect=[OSError('starting'),info]),patch.object(cn.subprocess,'Popen',side_effect=launch),patch.object(cn.subprocess,'run') as run,patch.object(dm,'child_env',return_value={}),patch.object(dm,'xcode_directory',return_value=Path('/Xcode')):
    self.assertEqual(cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'}),'http://[fd00::1]:18120')
    run.assert_not_called()
+
+ def test_xctestrun_relocates_paths_and_keeps_existing_signed_host(self):
+  import plistlib
+  original=(self.products/'Runner.xctestrun').read_bytes()
+  path=cn.prepare_wireless_xctestrun(self.runtime/'DerivedData',self.runtime,'com.igconsole.test.xctrunner',18200,18201)
+  target=plistlib.loads(path.read_bytes())['Runner']
+  self.assertEqual(target['TestHostPath'],str((self.products/'Debug-iphoneos/WebDriverAgentRunner-Runner.app').resolve()))
+  self.assertEqual(target['EnvironmentVariables']['USE_PORT'],'18200')
+  self.assertEqual(target['EnvironmentVariables']['MJPEG_SERVER_PORT'],'18201')
+  self.assertEqual((self.products/'Runner.xctestrun').read_bytes(),original)
+  self.assertTrue(Path(target['TestBundlePath'].replace('__TESTHOST__',target['TestHostPath'])).exists())
+ def test_xctest_can_establish_connection_before_coredevice_reports_tunnel_address(self):
+  details=self.details(None);details['connectionProperties'].pop('tunnelIPAddress')
+  process=Mock();process.poll.return_value=None
+  def launch(*args,**kwargs):
+   kwargs['stdout'].write(b'ServerURLHere->http://192.168.31.113:8100<-ServerURLHere\n');kwargs['stdout'].flush();return process
+  info={'fingerprint':'pin','bundle':'com.igconsole.test.xctrunner','url':'http://192.168.31.113:8100'}
+  with patch.object(dm,'coredevice',return_value=details),patch.object(cn,'inspect',return_value=info) as inspect,patch.object(cn.subprocess,'Popen',side_effect=launch),patch.object(dm,'child_env',return_value={}),patch.object(dm,'xcode_directory',return_value=Path('/Xcode')):
+   self.assertEqual(cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'}),'http://192.168.31.113:8100')
+   inspect.assert_called_once_with('http://192.168.31.113:8100')
+ def test_missing_or_different_signed_host_never_starts_a_process(self):
+  import plistlib
+  host=self.products/'Debug-iphoneos/WebDriverAgentRunner-Runner.app/Info.plist'
+  host.write_bytes(plistlib.dumps({'CFBundleIdentifier':'com.igconsole.other.xctrunner'}))
+  with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',side_effect=OSError('not ready')),patch.object(cn.subprocess,'run',return_value=Mock(returncode=0,stdout='')),patch.object(cn.subprocess,'Popen') as launch:
+   with self.assertRaisesRegex(RuntimeError,'不匹配'):cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'})
+   launch.assert_not_called()
+ def test_missing_test_products_keeps_cached_wda_usable_but_does_not_guess_a_launch(self):
+  (self.products/'Runner.xctestrun').unlink()
+  with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',side_effect=OSError('not ready')),patch.object(cn.subprocess,'run',return_value=Mock(returncode=0,stdout='')),patch.object(cn.subprocess,'Popen') as launch:
+   with self.assertRaisesRegex(RuntimeError,'缺少已签名'):cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'})
+   launch.assert_not_called()
+  dm.write_json(self.runtime/'network-runtime.json',{'url':'http://192.168.1.4:8100'})
+  with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',return_value={'fingerprint':'pin','url':'http://192.168.1.4:8100'}),patch.object(cn.subprocess,'run',return_value=Mock(returncode=0,stdout='')),patch.object(cn.subprocess,'Popen') as launch:
+   self.assertEqual(cn.ensure_wifi(self.udid,setting_override={'mode':'wifi','fingerprint':'pin'}),'http://192.168.1.4:8100');launch.assert_not_called()
+ def test_xcode_destination_failure_preserves_specific_diagnostic(self):
+  process=Mock();process.poll.return_value=70
+  def launch(*args,**kwargs):
+   kwargs['stdout'].write(b'Unable to find a device matching the provided destination specifier.\n');kwargs['stdout'].flush();return process
+  with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',side_effect=OSError('not ready')),patch.object(cn.subprocess,'Popen',side_effect=launch),patch.object(cn.subprocess,'run',return_value=Mock(returncode=0,stdout='')),patch.object(dm,'child_env',return_value={}),patch.object(dm,'xcode_directory',return_value=Path('/Xcode')):
+   with self.assertRaisesRegex(RuntimeError,'Xcode 未能连接'):cn.ensure_wifi(self.udid,setting_override={'mode':'wifi'})
+  evidence=json.loads((self.runtime/'connection-diagnostic.json').read_text())
+  self.assertEqual(evidence['stage'],'xctest_destination_missing');self.assertEqual(evidence['startup_method'],'xcodebuild-test-without-building')
 
 class WdaProtocol(unittest.TestCase):
  def test_read_only_verification_over_real_http_and_redirect_rejection(self):

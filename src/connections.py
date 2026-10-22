@@ -1,5 +1,7 @@
 """Explicit per-device transports. Network requests never use system HTTP proxies."""
 import ipaddress,json,re,subprocess,threading,time,plistlib,fcntl
+import hashlib
+from contextlib import ExitStack
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import build_opener,ProxyHandler,Request,HTTPRedirectHandler
@@ -16,21 +18,54 @@ def load(udid):
     if not path.exists():return {'mode':'usb'}
     try:value=json.loads(path.read_text())
     except (OSError,ValueError):raise ValueError('连接配置无法读取，请重新保存连接方式。')
+    if isinstance(value,dict) and value.get('merged_into'):raise ValueError('此发现档案已合并到原来的已配对手机档案，请使用原手机档案。')
     validate(value);return value
 
-def save(udid,setting):
+def merged_target(udid):
+    import device_manager as dm
+    try:
+        old=json.loads((dm.device_dir(udid)/'connection.json').read_text())
+        if not isinstance(old,dict):return None
+        target=old.get('merged_into')
+        if not target:return None
+        if not (dm.device_dir(target)/'config.json').is_file():return None
+        current=load(target)
+        if current.get('mode')=='wifi' and current.get('fingerprint')==old.get('previous_connection',{}).get('fingerprint'):return target
+    except (OSError,ValueError,TypeError):pass
+    return None
+
+def save(udid,setting,merge_discovered_alias=False):
     import device_manager as dm
     validate(setting);dm.DATA.mkdir(parents=True,exist_ok=True)
-    with (dm.DATA/'connection-bindings.lock').open('a') as guard:
+    with (dm.DATA/'connection-bindings.lock').open('a') as guard, ExitStack() as locks:
         fcntl.flock(guard,fcntl.LOCK_EX)
-        pin=setting.get('fingerprint')
+        pin=setting.get('fingerprint');aliases=[]
         if pin:
             for path in (dm.DATA/'devices').glob('*/connection.json'):
                 if path.parent.name==udid:continue
                 try:other=json.loads(path.read_text())
                 except (OSError,ValueError):continue
-                if other.get('fingerprint')==pin:raise RuntimeError('这台 WDA 手机已经绑定到另一个设备档案，请使用原档案，避免重复任务。')
-        dm.write_json(dm.device_dir(udid)/'connection.json',setting)
+                if not isinstance(other,dict):continue
+                if other.get('fingerprint')!=pin:continue
+                # Only collapse a discovery-generated identity after the caller
+                # has verified this physical phone's local signed XCTest server.
+                if (merge_discovered_alias and setting['mode']=='wifi' and setting.get('identifier_kind','udid')=='udid'
+                    and other.get('mode')=='remote' and other.get('identifier_kind')=='wda'
+                    and path.parent.name==hashlib.sha256(pin.encode()).hexdigest()[:32]):
+                    from app_paths import lock_device
+                    locks.enter_context(lock_device(path.parent.name))
+                    aliases.append((path,other));continue
+                raise RuntimeError('这台 WDA 手机已经绑定到另一个设备档案，请使用原档案，避免重复任务。')
+        target=dm.device_dir(udid)/'connection.json'
+        before={p:p.read_bytes() if p.exists() else None for p in [target]+[p for p,_ in aliases]}
+        try:
+            dm.write_json(target,setting)
+            for path,old in aliases:dm.write_json(path,{'mode':'usb','merged_into':udid,'previous_connection':old})
+        except Exception:
+            for path,raw in before.items():
+                if raw is None:path.unlink(missing_ok=True)
+                else:path.write_bytes(raw)
+            raise
 
 def validate(cfg):
     if not isinstance(cfg,dict) or cfg.get('mode') not in MODES:raise ValueError('请选择 USB、本地 Wi-Fi 或远程已有 WDA。')
@@ -174,6 +209,42 @@ def record_connection_failure(udid,trace,error):
     dm.write_json(path,evidence)
     return path
 
+def prepare_wireless_xctestrun(derived,runtime,bundle,port,mjpeg):
+    """Use this Mac's signed test host, with paths independent of spec location."""
+    products=Path(derived)/'Build/Products'
+    runs=sorted(products.glob('*.xctestrun'),key=lambda p:p.stat().st_mtime,reverse=True)
+    if not runs:raise RuntimeError('本机缺少已签名的 XCTest 测试产物。请通过 USB 在本机完成一次组件安装或验证，再使用 Wi-Fi；不需要重复创建证书。')
+    def targets(value):
+        if isinstance(value,dict):
+            if 'TestBundlePath' in value:yield value
+            else:
+                for child in value.values():yield from targets(child)
+        elif isinstance(value,list):
+            for child in value:yield from targets(child)
+    def relocate(value,root):
+        if isinstance(value,str):return value.replace('__TESTROOT__',str(root))
+        if isinstance(value,dict):return {k:relocate(v,root) for k,v in value.items()}
+        if isinstance(value,list):return [relocate(v,root) for v in value]
+        return value
+    for run in runs:
+        try:value=relocate(plistlib.loads(run.read_bytes()),run.parent.resolve())
+        except (OSError,ValueError,plistlib.InvalidFileException):continue
+        rows=list(targets(value))
+        if not rows or any(row.get('TestHostBundleIdentifier')!=bundle for row in rows):continue
+        for row in rows:
+            host=Path(row.get('TestHostPath',''))
+            try:identity=plistlib.loads((host/'Info.plist').read_bytes()).get('CFBundleIdentifier')
+            except (OSError,ValueError,plistlib.InvalidFileException):break
+            if identity!=bundle:break
+            test=Path(row['TestBundlePath'].replace('__TESTHOST__',str(host)))
+            if not test.exists():break
+            row.setdefault('EnvironmentVariables',{}).update(USE_PORT=str(port),MJPEG_SERVER_PORT=str(mjpeg),WDA_PRODUCT_BUNDLE_IDENTIFIER=bundle)
+        else:
+            path=Path(runtime)/'wireless.xctestrun'
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(plistlib.dumps(value));return path
+    raise RuntimeError('本机 XCTest 产物与当前签名组件不匹配或文件缺失。请通过 USB 的“连接与签名”恢复该手机组件，不会启动其他签名组件。')
+
 def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
     from runner import Halt
     trace={'stage':'preflight','candidates':[]}
@@ -218,10 +289,9 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
     if runs:read_env(plistlib.loads(runs[0].read_bytes()))
     port=int(env.get('USE_PORT',8100));mjpeg=int(env.get('MJPEG_SERVER_PORT',9100))
     if not 1<=port<=65535 or not 1<=mjpeg<=65535:raise RuntimeError('测试产物端口配置无效，请重新安装组件。')
-    ip=c.get('tunnelIPAddress')
-    if not ip:raise RuntimeError('苹果无线开发隧道未建立，请确认同一局域网、IPv6、解锁及首次配对；Tailscale 不能自动代替此步骤。')
-    url=f'http://[{ip}]:{port}' if ':' in ip else f'http://{ip}:{port}'
-    trace.update(stage='existing_endpoint',candidates=[url],wda_port=port,mjpeg_port=mjpeg)
+    ip=c.get('tunnelIPAddress') or ''
+    url=(f'http://[{ip}]:{port}' if ':' in ip else f'http://{ip}:{port}') if ip else None
+    trace.update(stage='existing_endpoint',candidates=[url] if url else [],wda_port=port,mjpeg_port=mjpeg)
     runtime=dm.device_dir(udid)
     # A running XCTest may advertise a LAN address different from Apple's tunnel.
     # Reuse it only after verifying the existing device binding again.
@@ -234,41 +304,45 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
             return info['url']
         except (OSError,ValueError,KeyError):pass
     try:
+        if not url:raise OSError('开发隧道尚未报告地址，交由 XCTest 建立开发连接。')
         info=inspect(url)
         if setting.get('fingerprint') and info['fingerprint']!=setting['fingerprint']:raise RuntimeError('无线设备指纹不一致，已停止。')
         dm.write_json(runtime/'network-runtime.json',{**info,'preview_url':url.rsplit(':',1)[0]+':'+str(mjpeg)});return url
     except (OSError,ValueError):pass
-    # Launch the installed, signed runner without Xcode's IDE test handshake or reinstall.
+    # Standard XCTest orchestration is required on affected Xcode 27/DDI stacks.
+    # Launching the runner as an ordinary app (even --no-activate) can fail with
+    # XCTest 10300 before the HTTP server exists. Reuse only this phone's signed
+    # build, without building, changing teams or requesting provisioning updates.
     bundle=record.get('bundle_id','')
     if not re.fullmatch(r'com\.igconsole\.[A-Za-z0-9_.-]+\.xctrunner',bundle):raise RuntimeError('签名记录中的控制组件标识无效，请通过设备向导确认。')
-    launch_env={'USE_PORT':str(port),'MJPEG_SERVER_PORT':str(mjpeg),'WDA_PRODUCT_BUNDLE_IDENTIFIER':bundle,
-                'DYLD_FRAMEWORK_PATH':'/System/Developer/Library/Frameworks','DYLD_LIBRARY_PATH':'/System/Developer/usr/lib'}
+    runtime=dm.device_dir(udid)
     with _LOCK:
-        trace.update(stage='preinstalled_startup',startup_method='devicectl-no-activate')
+        trace.update(stage='xctest_startup',startup_method='xcodebuild-test-without-building')
         process=_PROCESSES.get(udid)
         log_file=runtime/'wireless-wda.log'
         offset=log_file.stat().st_size if log_file.exists() else 0
         if process is None or process.poll() is not None:
-            notify('正在后台启动已安装控制组件；如手机要求密码或自动化验证，请在手机上完成，不需要重新签名。')
+            spec=prepare_wireless_xctestrun(derived,runtime,bundle,port,mjpeg)
+            notify('正在通过 XCTest 启动已有签名组件，不重新编译或创建证书；请保持手机解锁并完成手机上的自动化验证。')
+            args=[str(dm.xcode_directory()/'usr/bin/xcodebuild'),'test-without-building',
+                  '-xctestrun',str(spec),'-destination','id='+udid,'-destination-timeout','30',
+                  '-parallel-testing-enabled','NO','-maximum-concurrent-test-device-destinations','1']
             with log_file.open('ab') as log:
-                process=subprocess.Popen([str(dm.xcode_directory()/'usr/bin/devicectl'),'device','process','launch','--device',udid,'--timeout','120','--console','--no-activate','--terminate-existing','--environment-variables',json.dumps(launch_env),bundle],env=dm.child_env(),stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+                process=subprocess.Popen(args,env=dm.child_env(),stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             process._igconsole_log_offset=offset
             _PROCESSES[udid]=process
         else:offset=getattr(process,'_igconsole_log_offset',offset)
-    deadline=time.monotonic()+100
+    deadline=time.monotonic()+150
     while time.monotonic()<deadline:
         check()
         with log_file.open('rb') as source:
             source.seek(offset);recent=source.read(2*1024*1024).decode(errors='replace')
-        # Start without activation rather than asking XCTest to press Home. With
-        # newer developer images that press can time out; redirected launch output
-        # can also arrive only after the runner has already exited. Never launch
-        # Settings in response to that late output or interrupt phone authentication.
+        # Only fresh output from this attempt can supply a LAN address or error.
         try:
-            # devicectl owns the startup connection. Do not concurrently query CoreDevice
-            # while it enables the developer image; use the runner's fresh LAN URL instead.
-            url=f'http://[{ip}]:{port}' if ':' in ip else f'http://{ip}:{port}'
-            candidates=[url]
+            # Do not concurrently query CoreDevice while XCTest prepares the device.
+            # Check the development tunnel and the runner's fresh LAN URL instead.
+            url=(f'http://[{ip}]:{port}' if ':' in ip else f'http://{ip}:{port}') if ip else None
+            candidates=[url] if url else []
             advertised=re.findall(r'ServerURLHere->(https?://[^<\s]+)<-ServerURLHere',recent)
             candidates=advertised[-1:]+candidates
             trace['candidates']=candidates
@@ -288,10 +362,16 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
                 raise RuntimeError('iOS 拒绝启动组件：手机处于锁定状态。请在手机输入锁屏密码、保持亮屏后重新验证；不需要重装或创建证书。')
             if 'Failed to background test runner' in recent:
                 trace['stage']='background_runner_failed'
-                raise RuntimeError('iOS 测试组件未能进入后台（XCTest 10300）。当前后台启动方式未通过本机开发环境验证；请保留日志，并通过 USB 做开发环境对照，不要重复创建证书。')
+                raise RuntimeError('iOS 测试组件未能进入后台（XCTest 10300）。标准 XCTest 启动仍未完成，请保留本次日志；用 USB 在 Xcode 中验证开发环境，不要重复创建证书。')
             if 'Timed out while enabling automation mode' in recent:
                 trace['stage']='automation_authorization'
                 raise RuntimeError('iOS 启用自动化超时。即使“UI 自动化”开关已开启，仍需检查手机上的密码或自动化验证提示；请完成后重试。详情见 wireless-wda.log。')
+            if 'Unable to find a device matching' in recent:
+                trace['stage']='xctest_destination_missing'
+                raise RuntimeError('Xcode 未能连接所选 iPhone。请保持手机解锁，在 Xcode 的 Devices and Simulators 确认网络连接；必要时插 USB 恢复开发连接，再重试。')
+            if any(value in recent for value in ('Test host path does not exist','Failed to load test bundle','The test bundle could not be found')):
+                trace['stage']='xctest_build_invalid'
+                raise RuntimeError('本机测试产物缺失或与当前 Xcode 不兼容，请通过 USB 的“连接与签名”恢复组件；不会自动创建证书。')
             if 'is not installed' in recent:
                 trace['stage']='component_missing'
                 raise RuntimeError('手机未安装本机签名记录对应的控制组件（'+bundle+'）。请在“连接与签名”恢复该组件；若换过签名团队，需要核对实际安装标识。无需因此重复创建证书。')

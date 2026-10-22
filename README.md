@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.6**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.7**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.6 无线启动修复测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.6/Instagram-Console-1.2.6-AppleSilicon.dmg)
+[下载 v1.2.7 XCTest 无线启动测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.7/Instagram-Console-1.2.7-AppleSilicon.dmg)
 
-[查看 v1.2.6 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.6)
+[查看 v1.2.7 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.7)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -193,3 +193,18 @@ API Key 只存于当前应用进程；使用模型服务会将采样内容发送
 安装：完全退出所有旧版控制台，将 DMG 或 ZIP 中的“Instagram 控制台.app”替换到 Applications 后打开。确认主窗口显示 **1.2.6**。保留原配置和签名，不需要因为本次故障重复创建证书。选择原手机档案的“连接方式 → 本地 Wi-Fi”，解锁手机并完成手机上的密码或自动化提示，再验证。如果提示已绑定到其他档案，使用已有网络档案并刷新连接；不要重复添加同一手机。
 
 验证：260 项自动检查通过，覆盖后台启动参数、延迟启动日志不打开设置、三种初始化失败、端口拒绝后的恢复提示及设备隔离。发布包另做签名完整性与独立运行依赖检查。尚未完成问题远程 Mac / iPhone 上安装 1.2.6 后的实机复验；这是供继续验证的预发布版本，不代表所有 iOS / Xcode 组合均已解决。
+
+
+## 1.2.7 XCTest 无线启动测试版
+
+1.2.6 的 `devicectl --no-activate` 在现场 Xcode 27.1 / iOS 26.6 上仍报 XCTest 10300。此版改用 `xcodebuild test-without-building` 正式编排 XCTest，复用本机已签名的 `.xctestrun` 和测试宿主，不执行编译、不申请新证书、不传自动续签或注册设备参数。通过日志中本轮上报的 WDA 地址验证服务；不再要求启动前就已存在隧道地址。
+
+启动前校验测试宿主 Bundle ID 和测试文件，重定位复制的 `__TESTROOT__` 路径并保留原始测试产物；只接受与当前签名记录一致的控制服务及已绑定设备指纹。缺少本机产物时提示 USB 恢复，不再猜测直接启动。诊断区分 Xcode 找不到设备、测试产物无效、锁屏、自动化授权及后台初始化错误。
+
+“本地 Wi-Fi”验证后保存时，可将同一指纹的空闲自动发现档案合并到原手机档案。仅处理以指纹哈希生成的远程发现标识；真实 UDID 档案仍禁止重复绑定，正在运行的档案禁止合并。原发现连接保留备份、浏览配置文件不删除，写入失败回滚。合并后的旧条目不再重复显示或启动。
+
+现场对照：2026-10-22，问题 Mac 使用 Xcode 27.1，对 iOS 26.6 手机复用现有产物执行标准 XCTest 启动，WDA 在局域网 8100 端口启动，`/status` 返回 `ready: true`，`/wda/device/info` 返回设备信息。此对照通过终端完成，尚未完成 1.2.7 发布包在问题 Mac 上点击“验证并保存”的完整验收；未运行社交操作、多设备或长时间浏览。
+
+验证：269 项自动检查通过，覆盖启动命令、测试产物路径、签名身份隔离、缺失产物、无预先隧道地址、重复发现档案的合并/锁定/回滚及已有网络行为。发布包另做版本、签名、独立运行依赖和压缩包完整性检查。本版为预发布，保留 USB 恢复路径。
+
+上游问题与对照依据：[Appium #22636](https://github.com/appium/appium/issues/22636)。
