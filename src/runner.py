@@ -53,6 +53,9 @@ def validate_motion(cfg):
 class TransportLost(RuntimeError):
     pass
 
+class InteractionSkipped(RuntimeError):
+    """Abandon one like/save attempt without replaying an uncertain write."""
+
 class ControlHTTPError(RuntimeError):
     def __init__(self,message,status,kind='',empty=False):
         super().__init__(message);self.status=status;self.kind=kind;self.empty=empty
@@ -688,9 +691,19 @@ class Runner:
         self.log(kind, message={'likes':'已点赞','saves':'已收藏','comments':'已评论'}[kind], author=post['author'])
 
     def toggle_on(self, post, kind, name, allowed_labels):
+        try:
+            return self._toggle_on(post,kind,name,allowed_labels)
+        except (NavigationLost,TransportLost) as exc:
+            raise InteractionSkipped('互动页面或连接变化，已放弃本条互动') from exc
+        except Exception as exc:
+            if transport_error(exc) or (isinstance(exc,ControlHTTPError) and exc.kind in ('stale element reference','no such element')):
+                raise InteractionSkipped('互动控件或连接异常，结果未确认，不会重发') from exc
+            raise
+
+    def _toggle_on(self, post, kind, name, allowed_labels):
         current = self.read_reel()
         if current['key'] != post['key']:
-            raise RuntimeError('视频发生变化，已停止互动')
+            raise InteractionSkipped('视频发生变化，已跳过本条互动')
         button = next((e for e in current['nodes'] if e.get('name')==name),None)
         if (button is None or toggle_is_active(button,kind) or button.get('value')=='1'
             or button.get('label','').casefold() not in allowed_labels):
@@ -706,7 +719,7 @@ class Runner:
             if toggle_is_active(button,kind):
                 self.completed(post,kind)
                 return
-        raise RuntimeError('互动结果无法确认，已停止；不会重试或重复点击')
+        raise InteractionSkipped('互动结果无法确认，已跳过；不会重试或重复点击')
 
     def comment(self, post):
         if self.cfg['comments_mode']=='ai':
@@ -1145,6 +1158,22 @@ class Runner:
                                 if burst>1:
                                     self.wait(self.rng.uniform(1.5,3.5))
                             self.back_depth=max(0,self.back_depth-burst)
+                    except InteractionSkipped as exc:
+                        # Preserve the pending ledger reservation and unwind the
+                        # interaction before recovering navigation or transport.
+                        self.in_interaction=False
+                        self.skip_interactions_once=True
+                        self.diagnose('interaction',exc)
+                        self.log('interaction_skipped',message='已跳过本条互动，不会重复点击；重新识别后继续浏览',detail=str(exc))
+                        try:
+                            self.read_reel()
+                        except NavigationLost:
+                            try:self.recover_reels()
+                            except TransportLost:self.recover_connection()
+                        except TransportLost:
+                            self.recover_connection()
+                        last_key=None
+                        continue
                     except TransportLost:
                         self.recover_connection()
                         last_key=None

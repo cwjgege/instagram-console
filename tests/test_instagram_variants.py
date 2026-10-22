@@ -2,7 +2,7 @@ import json,sys,tempfile,unittest,xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path('src').resolve()))
-from runner import Runner,NavigationLost,search_input_node,search_layout,search_back_name,toggle_is_active
+from runner import Runner,NavigationLost,InteractionSkipped,search_input_node,search_layout,search_back_name,toggle_is_active
 CFG=json.loads(Path('src/default-config.json').read_text())
 def node(tag='XCUIElementTypeButton',**attrs):return ET.Element(tag,dict(visible='true',**attrs))
 def tree(*nodes):
@@ -71,11 +71,11 @@ class Variants(unittest.TestCase):
   p=self.post('Liked',True);self.r.read_reel=Mock(return_value=p);self.r.toggle_on(p,'likes','like-button',{'like','like post'});self.r.click.assert_not_called()
  def test_unconfirmed_like_remains_reserved_and_never_replayed(self):
   p=self.post();self.r.read_reel=Mock(return_value=p)
-  with self.assertRaisesRegex(RuntimeError,'无法确认'):self.r.toggle_on(p,'likes','like-button',{'like','like post'})
+  with self.assertRaisesRegex(InteractionSkipped,'无法确认'):self.r.toggle_on(p,'likes','like-button',{'like','like post'})
   self.r.toggle_on(p,'likes','like-button',{'like','like post'})
   self.r.click.assert_called_once();self.assertEqual(self.r.daily['posts']['post']['likes'],'pending')
  def test_like_on_different_post_is_not_confirmed(self):
   p=self.post();self.r.read_reel=Mock(side_effect=[p,self.post('Liked',True,'different')])
-  with self.assertRaisesRegex(RuntimeError,'无法确认'):self.r.toggle_on(p,'likes','like-button',{'like','like post'})
+  with self.assertRaisesRegex(InteractionSkipped,'无法确认'):self.r.toggle_on(p,'likes','like-button',{'like','like post'})
   self.assertEqual(self.r.counts['likes'],0);self.r.click.assert_called_once()
 if __name__=='__main__':unittest.main()
