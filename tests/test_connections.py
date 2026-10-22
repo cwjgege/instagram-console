@@ -127,6 +127,18 @@ class LocalWirelessStartup(unittest.TestCase):
   with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',return_value={'url':url,'fingerprint':'pin','ios':'18.1'}) as inspect,patch.object(cn.subprocess,'Popen') as launch:
    self.assertEqual(cn.ensure_wifi(self.udid,setting_override={'mode':'wifi','fingerprint':'pin'}),url)
    inspect.assert_called_once_with(url);launch.assert_not_called()
+ def test_merged_lan_endpoint_is_preferred_over_temporary_tunnel(self):
+  tunnel='http://[fd00::1]:18120';lan='http://192.168.1.4:18120'
+  dm.write_json(self.runtime/'network-runtime.json',{'url':tunnel})
+  dm.write_json(dm.device_dir('a'*32)/'connection.json',{'merged_into':self.udid,'previous_connection':{'mode':'remote','fingerprint':'pin','wda_url':lan,'preview_url':'http://192.168.1.4:9100'}})
+  with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',return_value={'url':lan,'fingerprint':'pin','ios':'18.1'}) as inspect,patch.object(cn.subprocess,'Popen') as launch:
+   self.assertEqual(cn.ensure_wifi(self.udid,setting_override={'mode':'wifi','fingerprint':'pin'}),lan)
+   inspect.assert_called_once_with(lan);launch.assert_not_called()
+   self.assertEqual(json.loads((self.runtime/'network-runtime.json').read_text())['preview_url'],'http://192.168.1.4:9100')
+ def test_merged_endpoint_cannot_supply_another_phones_address(self):
+  for target,pin in [('other','pin'),(self.udid,'other')]:
+   dm.write_json(dm.device_dir('a'*32)/'connection.json',{'merged_into':target,'previous_connection':{'mode':'remote','fingerprint':pin,'wda_url':'http://192.168.1.4:8100'}})
+   self.assertEqual(cn.saved_wifi_endpoints(self.udid,'pin'),[])
  def test_bound_fingerprint_mismatch_stops_without_launching_other_runner(self):
   with patch.object(dm,'coredevice',return_value=self.details('fd00::1')),patch.object(cn,'inspect',return_value={'fingerprint':'other'}),patch.object(cn.subprocess,'run',return_value=Mock(returncode=0,stdout='')),patch.object(cn.subprocess,'Popen') as launch:
    with self.assertRaisesRegex(RuntimeError,'指纹'):cn.ensure_wifi(self.udid,setting_override={'mode':'wifi','fingerprint':'pin'})

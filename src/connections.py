@@ -177,6 +177,30 @@ def derived_path(udid):
         return Path(caps['appium:derivedDataPath'])
     except (OSError,ValueError,KeyError):return runtime/'DerivedData'
 
+def saved_wifi_endpoints(udid,pin):
+    """Retain verified LAN candidates when discovery aliases are merged."""
+    import device_manager as dm
+    if not pin:return []
+    candidates=[]
+    try:candidates.append(json.loads((dm.device_dir(udid)/'network-runtime.json').read_text()))
+    except (OSError,ValueError):pass
+    for path in (dm.DATA/'devices').glob('*/connection.json'):
+        try:
+            value=json.loads(path.read_text());old=value.get('previous_connection',{})
+            if value.get('merged_into')==udid and old.get('fingerprint')==pin and old.get('mode')=='remote':
+                candidates.append({'url':old['wda_url'],'preview_url':old.get('preview_url','')})
+        except (OSError,ValueError,KeyError,AttributeError,TypeError):continue
+    valid=[];seen=set()
+    for value in candidates:
+        try:
+            url=validate_url(value['url'])
+            if url in seen:continue
+            seen.add(url);valid.append({**value,'url':url})
+        except (ValueError,KeyError,TypeError):continue
+    # A temporary Apple development tunnel can pass preflight and then disappear.
+    # Prefer a previously bound IPv4 endpoint, but recheck its fingerprint first.
+    return sorted(valid,key=lambda value:':' in (urlsplit(value['url']).hostname or ''))
+
 def stop_device(udid):
     with _LOCK:process=_PROCESSES.pop(udid,None)
     if process and process.poll() is None:
@@ -296,13 +320,13 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
     # A running XCTest may advertise a LAN address different from Apple's tunnel.
     # Reuse it only after verifying the existing device binding again.
     if setting.get('fingerprint'):
-        try:
-            cached=json.loads((runtime/'network-runtime.json').read_text())
-            trace['candidates'].append(cached['url'])
-            info=checked(cached['url'],setting['fingerprint'])
-            dm.write_json(runtime/'network-runtime.json',{**info,'preview_url':cached.get('preview_url','')})
-            return info['url']
-        except (OSError,ValueError,KeyError):pass
+        for cached in saved_wifi_endpoints(udid,setting['fingerprint']):
+            try:
+                trace['candidates'].append(cached['url'])
+                info=checked(cached['url'],setting['fingerprint'])
+                dm.write_json(runtime/'network-runtime.json',{**info,'preview_url':cached.get('preview_url','')})
+                return info['url']
+            except (OSError,ValueError,KeyError):pass
     try:
         if not url:raise OSError('开发隧道尚未报告地址，交由 XCTest 建立开发连接。')
         info=inspect(url)

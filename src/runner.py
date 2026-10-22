@@ -489,7 +489,7 @@ class Runner:
                 raise
             self.log('reconnected',message='连接已恢复，重新识别视频后继续')
             return
-        raise RuntimeError('控制连接恢复失败，5 分钟内重连次数已用完；请检查 USB 稳定性后重新开始')
+        raise RuntimeError('控制连接恢复失败，5 分钟内重连次数已用完；请检查当前连接、手机解锁状态及控制服务后重新开始')
 
     def reels(self, initial_tree=None):
         # A caller may pass the tree it just verified, with no intervening action.
