@@ -33,14 +33,18 @@ def classify_setup_error(error,logs=''):
         return SetupError('certificate_trust','Mac 开发证书的信任设置无效。请在钥匙串访问中双击本次 Apple Development 证书，将“使用此证书时”恢复为“使用系统默认值”，保存后重试；不要设为“始终信任”。','签名')
     if 'unable to find a device matching the provided destination' in text:
         return SetupError('xcode_device_missing','Xcode 没有把所选手机列为可用安装目标。请检查 Xcode 的设备支持范围、配对与连接；iOS 16 请使用支持它的 Xcode 版本。无需先重建证书。','设备支持')
+    if any(s in text for s in ('unable to verify app','profile needs network validation','requires network validation')):
+        return SetupError('network_validation','手机尚未完成 Apple 在线签名验证。请保持手机联网，检查 VPN/代理是否影响 ppq.apple.com 的 HTTPS 连接；在手机打开一次控制组件后重新验证。VPN 与设备管理没有信任条目时，不要反复重签名。')
     if any(s in text for s in ('developer app certificate is not trusted','untrusted developer','开发者未受信任')):
-        return SetupError('developer_untrusted','控制组件启动被手机拒绝：开发者 App 尚未受信任或未完成验证。请在手机「设置 → 通用 → VPN 与设备管理」选择本次签名账号并完成信任/验证；保持联网和解锁，然后点击「重新验证已安装组件」。无需反复重新签名。')
+        return SetupError('developer_untrusted','控制组件启动被手机拒绝：开发者 App 尚未受信任或未完成验证。若手机「VPN 与设备管理」有对应开发者条目，请完成信任；若没有条目或提示 Unable to Verify App，请先让手机正常联网并检查 VPN/代理，再打开一次控制组件完成 Apple 在线验证。随后点击「重新验证已安装组件」。无需反复重新签名。')
     if any(s in text for s in ('provisioning profile has expired','certificate has expired','signing certificate is invalid','certificate was revoked')):
         return SetupError('signature_invalid','签名证书或描述文件已失效。请在 Xcode 检查签名账号和有效证书，再重新签名安装。','签名')
     if 'invalid code signature' in text or 'inadequate entitlements' in text:
         return SetupError('signature_or_trust','手机拒绝启动：签名、权限或开发者信任未通过。请先检查手机「VPN 与设备管理」的验证状态；若已验证，再检查本次签名证书和描述文件。')
     if any(s in text for s in ('maximum number of apps for free development','maximum app id limit','maximum number of registered app ids')):
         return SetupError('account_limit','苹果开发账号的 App 安装或标识注册额度已达上限。请在 Xcode 查看账号限制和已有开发 App；反复安装或创建证书不会解除额度限制。','签名')
+    if 'no account for team' in text:
+        return SetupError('signing_account_missing','所选签名团队在这台 Mac 的 Xcode 中没有可用账号。钥匙串中有旧证书不代表可为新设备签名；请选择本机已登录且可用的团队，或在 Xcode → Settings → Accounts 登录该团队后重试。无需修改手机开发者模式。','签名')
     if any(s in text for s in ('no signing certificate','no profiles for','requires a provisioning profile','signing for','no accounts','authentication credentials','failed to register bundle identifier')):
         return SetupError('signing_failed','Xcode 未能完成开发签名或描述文件配置。请在 Xcode → Settings → Accounts 检查本次团队的账号、证书和设备注册；详细原因见本次 device-setup.log / appium.log。','签名')
     if 'unable to verify app' in text:

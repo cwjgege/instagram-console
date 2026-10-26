@@ -17,8 +17,8 @@ async function probe(){
 async function apps(){
  if(!/^[a-fA-F0-9-]{10,50}$/.test(cfg.udid))throw Error('Invalid device identifier');
  let service=await ios.services.startInstallationProxyService(cfg.udid);
- try{const values=await service.lookupApplications({applicationType:'User',...(cfg.bundles?{bundleIds:cfg.bundles}:{}),returnAttributes:['CFBundleIdentifier','CFBundleDisplayName','CFBundleName','CFBundleShortVersionString']});
-  write(Object.entries(values).filter(([bundle])=>cfg.bundles?cfg.bundles.includes(bundle):/webdriver|igconsole|xctrunner/i.test(bundle)).map(([bundle,v])=>({bundle,name:v.CFBundleDisplayName||v.CFBundleName||bundle,version:v.CFBundleShortVersionString||''})))
+ try{const values=await service.lookupApplications({applicationType:'User',...(cfg.bundles?{bundleIds:cfg.bundles}:{}),returnAttributes:['CFBundleIdentifier','CFBundleDisplayName','CFBundleName','CFBundleShortVersionString','Path']});
+  write(Object.entries(values).filter(([bundle])=>cfg.bundles?cfg.bundles.includes(bundle):/webdriver|igconsole|xctrunner/i.test(bundle)).map(([bundle,v])=>({bundle,name:v.CFBundleDisplayName||v.CFBundleName||bundle,version:v.CFBundleShortVersionString||'',path:v.Path||''})))
  }finally{service.close()}
 }
 async function forward(local,remote){

@@ -338,7 +338,7 @@ def setup_attempt(device,team,job):
     except Exception as exc:
         issue=classify_setup_error(exc,attempt_text(runtime,positions))
         state={'status':'failed','code':issue.code,'stage':issue.stage,'message':str(issue),'updated_at':datetime.now(timezone.utc).isoformat()}
-        if issue.code in ('developer_untrusted','signature_or_trust','locked','automation_timeout','connection','unknown'):
+        if issue.code in ('network_validation','developer_untrusted','signature_or_trust','locked','automation_timeout','connection','unknown'):
             if stage_installed_candidate(device,team):state['status']='awaiting_trust' if issue.code=='developer_untrusted' else 'awaiting_validation'
         try:pending=json.loads((runtime/'pending-setup.json').read_text());state['can_verify']=pending.get('team_id')==team
         except (OSError,ValueError,AttributeError):state['can_verify']=False
@@ -351,6 +351,20 @@ def provision(device,team,notify=lambda message:None):
     """Build/sign/install WDA for the selected USB phone. Never opens Instagram."""
     with lock_device(device['udid']):return setup_attempt(device,team,lambda:_provision(device,team,notify))
 
+
+def stop_controller_for_install(device,bundle):
+    """Stop only the selected, installed bundle so Appium cannot reuse stale WDA code."""
+    if str(device.get('ios','')).split('.')[0]=='16':return
+    from urllib.parse import urlsplit,unquote
+    apps=controller_apps(device['udid'],[bundle])
+    paths={str(a.get('path','')).rstrip('/') for a in apps if a.get('bundle')==bundle and a.get('path')}
+    if not paths:return
+    processes=coredevice(['device','info','processes','--device',device['udid']]).get('runningProcesses',[])
+    for process in processes:
+        executable=unquote(urlsplit(process.get('executable','')).path)
+        if any(executable.startswith(path+'/') for path in paths):
+            pid=process.get('processIdentifier')
+            if type(pid) is int and pid>0:coredevice(['device','process','terminate','--device',device['udid'],'--pid',str(pid)])
 
 def _provision(device,team,notify):
     runtime=device_dir(device['udid']);runtime.mkdir(parents=True,exist_ok=True)
@@ -372,6 +386,8 @@ def _provision(device,team,notify):
             except Exception:pass
             old.unlink(missing_ok=True)
         payload=make_payload(fresh,team)
+        target_bundle=(previous.get('bundle_id') if previous and previous.get('team_id')==team else payload['capabilities']['alwaysMatch']['appium:updatedWDABundleId']+'.xctrunner')
+        stop_controller_for_install(fresh,target_bundle)
         if previous and previous.get('team_id')==team:
             payload['capabilities']['alwaysMatch']['appium:updatedWDABundleId']=previous['bundle_id'].removesuffix('.xctrunner')
         legacy=str(fresh.get('ios','')).split('.')[0]=='16'

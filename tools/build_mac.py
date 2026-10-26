@@ -22,6 +22,9 @@ def main():
     with tarfile.open(package) as bundle:bundle.extractall(legacy,filter='data')
     if (VENDOR/'legacy-wda').exists():shutil.rmtree(VENDOR/'legacy-wda')
     shutil.copytree(legacy/'package',VENDOR/'legacy-wda')
+    from patch_wda_location import patch
+    patch(VENDOR/'node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent')
+    patch(VENDOR/'legacy-wda')
     archive=STAGE/'vendor.tar.gz'
     with tarfile.open(archive,'w:gz',compresslevel=6) as bundle:
         for child in VENDOR.iterdir():bundle.add(child,arcname=child.name)

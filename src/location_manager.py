@@ -30,24 +30,36 @@ def worker_command():
     return [python,str(Path(__file__).resolve().parents[1]/'location_helper/worker.py')]
 
 class LocationManager:
-    def __init__(self):self.lock=threading.RLock();self.sessions={};self.states={};self.closing=False
+    def __init__(self):
+        self.lock=threading.RLock();self.sessions={};self.states={};self.closing=False
+        from location_guard import LocationGuard
+        self.guard=LocationGuard(self)
     def _path(self,udid):return dm.device_dir(udid)/'location.json'
     def snapshot(self,udid):
         with self.lock:
             if udid in self.states:return dict(self.states[udid])
             try:old=json.loads(self._path(udid).read_text())
             except (OSError,ValueError):old={}
-            return {'phase':'idle','message':'尚未设置模拟定位。' if not old else '上次定位请求已记录，当前手机位置尚未确认。','latitude':old.get('latitude'),'longitude':old.get('longitude')}
+            if not isinstance(old,dict):old={}
+            return {'guard_enabled':False,'guard_status':'off','phase':'idle','message':'尚未设置模拟定位。' if not old else '上次定位请求已记录，当前手机位置尚未确认。','latitude':old.get('latitude'),'longitude':old.get('longitude')}
     def _state(self,udid,phase,message,**extra):
         previous=self.states.get(udid,{})
         state={**previous,**extra,'phase':phase,'message':message,'updated_at':time.time()}
         self.states[udid]=state
         try:dm.write_json(self._path(udid),state)
         except OSError:pass
-    def apply(self,udid,lat,lon):
+    def apply(self,udid,lat,lon,keep=False):
         lat,lon=coordinates(lat,lon);validate_target(udid)
-        self._request(udid,{'action':'set','udid':udid,'latitude':lat,'longitude':lon})
-    def clear(self,udid):validate_target(udid);self._request(udid,{'action':'clear','udid':udid})
+        with self.lock:
+            if self.states.get(udid,{}).get('phase')=='busy':raise RuntimeError('此设备的定位请求正在处理中。')
+            self.guard.stop(udid)
+            self._request(udid,{'action':'set','udid':udid,'latitude':lat,'longitude':lon})
+            if keep:self.guard.start(udid,(lat,lon))
+    def stop_guard(self,udid):self.guard.stop(udid)
+    def clear(self,udid):
+        validate_target(udid)
+        with self.lock:
+            self.guard.stop(udid);self._request(udid,{'action':'clear','udid':udid})
     def _request(self,udid,request):
         with self.lock:
             if self.closing:raise RuntimeError('软件正在退出，请稍候。')
@@ -92,7 +104,7 @@ class LocationManager:
                     if event in ('applied','clear_sent','connected') and value.get('udid','').replace('-','').lower()!=udid.replace('-','').lower():raise RuntimeError('定位后端设备不匹配。')
                     if event=='applied':
                         lat,lon=coordinates(value['latitude'],value['longitude'])
-                        self._state(udid,'applied',f'定位服务已接受坐标（{lat:.6f}, {lon:.6f}），请在手机地图中确认。',latitude=lat,longitude=lon)
+                        self._state(udid,'applied',f'定位服务已接受坐标（{lat:.6f}, {lon:.6f}），请在手机地图中确认。',latitude=lat,longitude=lon,last_apply_at=time.time())
                     elif event=='clear_sent':self._state(udid,'clear_sent','已发送恢复真实定位指令，请在手机地图中确认。')
                     elif event=='connected':
                         if self.states.get(udid,{}).get('phase')=='applied':self.states[udid]['checked_at']=time.time()
@@ -118,6 +130,7 @@ class LocationManager:
     def shutdown(self,timeout=12):
         with self.lock:
             if self.closing:return
+            self.guard.stop_all()
             self.closing=True;sessions=list(self.sessions.items())
             for udid,session in sessions:
                 p=session['process']
@@ -132,3 +145,5 @@ class LocationManager:
                 p.terminate()
                 try:p.wait(timeout=2)
                 except subprocess.TimeoutExpired:p.kill();p.wait()
+
+        self.guard.wait_stopped()

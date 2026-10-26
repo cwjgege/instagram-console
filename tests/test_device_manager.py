@@ -23,8 +23,9 @@ class DeviceSetup(unittest.TestCase):
   self.assertNotIn('password',json.dumps(c).lower());self.assertTrue(c['appium:noReset'])
  def test_provision_build_request_never_requests_phone_app_uninstall(self):
   record={'expires_at':(datetime.now(timezone.utc)+timedelta(days=7)).isoformat()}
-  with patch.object(dm,'scan_devices',return_value=[self.device]),patch.object(dm,'check_xcode'),patch('runtime_manager.ensure_server',return_value={'url':'http://127.0.0.1:19000/igconsole'}),patch.object(dm,'close_other_sessions'),patch.object(dm,'profile_record',return_value=record),patch('runner.call',return_value={'sessionId':'new'}) as call:
+  with patch.object(dm,'scan_devices',return_value=[self.device]),patch.object(dm,'check_xcode'),patch('runtime_manager.ensure_server',return_value={'url':'http://127.0.0.1:19000/igconsole'}),patch.object(dm,'close_other_sessions'),patch.object(dm,'stop_controller_for_install') as stop_old,patch.object(dm,'profile_record',return_value=record),patch('runner.call',return_value={'sessionId':'new'}) as call:
    dm.provision(self.device,'ABCDE12345')
+  stop_old.assert_called_once()
   caps=call.call_args.args[2]['capabilities']['alwaysMatch']
   self.assertFalse(caps['appium:useNewWDA']);self.assertFalse(caps['appium:usePrebuiltWDA'])
  def test_reject_path_injection(self):
@@ -127,3 +128,15 @@ class DeveloperModeDetection(unittest.TestCase):
   d=self.device()
   with patch('runtime_manager.probe_legacy',return_value=[self.device(developer=False)]):dm.resolve_developer_modes([d])
   self.assertIs(d['developer'],False)
+
+class ComponentReplacement(unittest.TestCase):
+ def test_only_the_selected_installed_controller_process_is_stopped(self):
+  d={'udid':'00008030-0011223344556677','ios':'27.0.1'};bundle='com.example.wda.xctrunner'
+  apps=[{'bundle':bundle,'path':'/private/Apps/Owned.app'}]
+  processes={'runningProcesses':[{'processIdentifier':7,'executable':'file:///private/Apps/Owned.app/Runner'},{'processIdentifier':8,'executable':'file:///private/Apps/Other.app/Runner'}]}
+  with patch.object(dm,'controller_apps',return_value=apps),patch.object(dm,'coredevice',side_effect=[processes,{}]) as command:dm.stop_controller_for_install(d,bundle)
+  self.assertEqual(command.call_args_list[1].args[0][-2:],['--pid','7']);self.assertEqual(command.call_count,2)
+ def test_no_process_is_stopped_without_matching_bundle_path(self):
+  with patch.object(dm,'controller_apps',return_value=[{'bundle':'other','path':'/private/Apps/Other.app'}]),patch.object(dm,'coredevice') as command:
+   dm.stop_controller_for_install({'udid':'0'*40,'ios':'27.0.1'},'com.example.wda')
+  command.assert_not_called()
