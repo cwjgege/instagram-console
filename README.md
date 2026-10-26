@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.11**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.12**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.11 固定定位与地图测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.11/Instagram-Console-1.2.11-AppleSilicon.dmg)
+[下载 v1.2.12 开发者模式检测修复版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.12/Instagram-Console-1.2.12-AppleSilicon.dmg)
 
-[查看 v1.2.11 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.11)
+[查看 v1.2.12 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.12)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -228,3 +228,9 @@ API Key 只存于当前应用进程；使用模型服务会将采样内容发送
 定位辅助程序按 GPL-3.0-or-later 提供，许可证见 `location_helper/COPYING`，第三方声明见 `licenses/location`。Release 同时提供定位后端及其精确依赖版本的对应源码与构建脚本。GUI 不导入该 Python 环境。构建时在独立 Python 3.14 环境安装 `location_helper/requirements.lock` 并运行 `tools/build_location.py`，然后在 GUI 构建环境运行 `tools/build_mac.py`；可通过 `IG_LOCATION_BACKEND` 指定已构建的后端目录。
 
 304 项自动检查通过，包含定位协议、双设备进程隔离、异常身份、恢复/超时、坐标投影和地图缓存检查；尚未完成本版实机定位验收。
+
+## 1.2.12 开发者模式误报修复
+
+Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当成未开启，阻止已经开启开发者模式的手机安装组件。新版区分已开启、未开启与尚未确认；状态缺失时，对原设备编号通过 Lockdown 核对，只有明确读到开启才放行。读取失败保留未确认，不以缺省值冒充已开启或未开启。USB 向导、网络发现与无线启动共用该判断。重新确认开启后，向导不再将之前的开发者模式错误作为当前结论。
+
+311 项检查通过；在本机连接的 iPhone 11 / iOS 27.0.1 上复现 Xcode 字段缺失，并通过手机端读取确认开发者模式已开启，修复后的完整 USB 扫描与设备准备校验通过。此验证未重签名、未安装组件、未更改手机开发者模式或定位。

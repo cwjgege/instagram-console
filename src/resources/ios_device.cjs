@@ -8,10 +8,10 @@ const write=(value)=>process.stdout.write(JSON.stringify(value)+'\n');
 async function probe(){
  const ids=await ios.utilities.getConnectedDevices();const result=[];
  for(const udid of cfg.targets||ids){if(!ids.includes(udid))continue;
-  try{let info=await ios.utilities.getDeviceInfo(udid);let paired=false,developer=false,l;
-   try{l=await ios.utilities.startLockdownSession(udid);paired=true;developer=!!await l.getValue({Key:'DeveloperModeStatus',Domain:'com.apple.security.mac.amfi'});}catch(e){}finally{if(l)l.close()}
+  try{let info=await ios.utilities.getDeviceInfo(udid);let paired=false,developer=null,l;
+   try{l=await ios.utilities.startLockdownSession(udid);paired=true;const mode=await l.getValue({Key:'DeveloperModeStatus',Domain:'com.apple.security.mac.amfi'});developer=mode===true||mode===1?true:mode===false||mode===0?false:null;}catch(e){}finally{if(l)l.close()}
    result.push({udid,name:info.DeviceName,ios:info.ProductVersion,product:info.ProductType,paired,developer});
-  }catch(e){result.push({udid,paired:false,developer:false,error:String(e.message).slice(0,180)})}
+  }catch(e){result.push({udid,paired:false,developer:null,error:String(e.message).slice(0,180)})}
  }write(result);
 }
 async function apps(){

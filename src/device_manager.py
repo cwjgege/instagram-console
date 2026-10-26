@@ -145,6 +145,25 @@ def coredevice(args):
             raise RuntimeError('无法读取 iPhone。请解锁、检查 USB 连接和“信任此电脑”，然后重新检测。')
         return json.loads(output.read_text())['result']
 
+def developer_mode(value):
+    if value is True or value=='enabled':return True
+    if value is False or value=='disabled':return False
+    return None
+
+def resolve_developer_modes(devices):
+    pending=[d for d in devices if d.get('paired') and d.get('developer') is None]
+    if not pending:return devices
+    from runtime_manager import probe_legacy
+    try:values=probe_legacy([d['udid'] for d in pending])
+    except (RuntimeError,subprocess.SubprocessError,OSError):return devices
+    normalize=lambda value:str(value).replace('-','').lower()
+    by_id={normalize(d.get('udid','')):d for d in values}
+    for device in pending:
+        info=by_id.get(normalize(device['udid']),{})
+        if info.get('paired') is True and isinstance(info.get('developer'),bool):
+            device['developer']=info['developer'];device['developer_source']='lockdown'
+    return devices
+
 def wired_iphones(result):
     devices=[]
     for d in result.get('devices',[]):
@@ -154,7 +173,7 @@ def wired_iphones(result):
         devices.append({'udid':hardware.get('udid',''),'identifier':d['identifier'],
             'name':props.get('name','iPhone'),'model':hardware.get('marketingName','iPhone'),
             'ios':props.get('osVersionNumber','未知'),'paired':connection.get('pairingState')=='paired',
-            'developer':props.get('developerModeStatus')=='enabled'})
+            'developer':developer_mode(props.get('developerModeStatus'))})
     return devices
 
 def usb_serials():
@@ -189,8 +208,8 @@ def scan_devices():
             info=values.get(d['identifier'].lower(),{})
             modern.append({'udid':d['identifier'],'identifier':d['identifier'],'name':info.get('name',d.get('name','iPhone')),
                 'model':d.get('modelName',info.get('product','iPhone')),'ios':info.get('ios',d.get('operatingSystemVersion','未知').split()[0]),
-                'paired':info.get('paired',False),'developer':info.get('developer',False)})
-    return modern
+                'paired':info.get('paired',False),'developer':info.get('developer')})
+    return resolve_developer_modes(modern)
 
 def certificate_info(der):
     with tempfile.TemporaryDirectory() as folder:
@@ -269,6 +288,7 @@ def compatibility_error(device):
 def validate_device(device):
     if compatibility_error(device):raise SetupError('unsupported_ios',compatibility_error(device),'设备支持')
     if not device.get('paired'):raise SetupError('pairing','手机尚未信任此电脑。请在 Finder 中选择手机并完成双方的信任提示；这不同于 VPN 与设备管理里的开发者 App 信任。','设备准备')
+    if device.get('developer') is None:raise SetupError('developer_mode_unconfirmed','尚未确认手机开发者模式状态；请保持手机解锁并重新检测，或在 Xcode 设备窗口检查连接准备状态。未读到状态不代表未开启。','设备准备')
     if not device.get('developer'):raise SetupError('developer_mode','请开启手机开发者模式，重启并确认开启后再安装。','设备准备')
 
 

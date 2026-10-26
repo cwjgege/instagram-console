@@ -121,8 +121,8 @@ def scan_network():
     for d in result.get('devices',[]):
         c=d.get('connectionProperties',{});h=d.get('hardwareProperties',{});p=d.get('deviceProperties',{})
         if h.get('deviceType')!='iPhone' or c.get('pairingState')!='paired' or c.get('transportType') not in ('wired','localNetwork'):continue
-        rows.append({'udid':h.get('udid',''),'identifier':d['identifier'],'name':p.get('name','iPhone'),'model':h.get('marketingName','iPhone'),'ios':p.get('osVersionNumber','未知'),'paired':True,'developer':p.get('developerModeStatus')=='enabled','transport':c.get('transportType'),'network':True})
-    return rows
+        rows.append({'udid':h.get('udid',''),'identifier':d['identifier'],'name':p.get('name','iPhone'),'model':h.get('marketingName','iPhone'),'ios':p.get('osVersionNumber','未知'),'paired':True,'developer':dm.developer_mode(p.get('developerModeStatus')),'transport':c.get('transportType'),'network':True})
+    return dm.resolve_developer_modes(rows)
 
 def discover():
     import device_manager as dm
@@ -306,7 +306,10 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
     details=dm.coredevice(['device','info','details','--device',udid]);h=details.get('hardwareProperties',{});c=details.get('connectionProperties',{});p=details.get('deviceProperties',{})
     trace.update(transport=c.get('transportType'),paired=c.get('pairingState'),ios=p.get('osVersionNumber'),developer=p.get('developerModeStatus'))
     if h.get('udid')!=udid or c.get('pairingState')!='paired':raise RuntimeError('未能验证原手机的开发配对，请首次通过 USB 完成配对。')
-    if p.get('developerModeStatus')!='enabled':raise RuntimeError('请先开启手机开发者模式。')
+    state={'udid':udid,'paired':True,'developer':dm.developer_mode(p.get('developerModeStatus'))}
+    dm.resolve_developer_modes([state]);trace['verified_developer']=state['developer']
+    if state['developer'] is None:raise RuntimeError('尚未确认手机开发者模式状态，请解锁后重新检测；这不代表开发者模式未开启。')
+    if state['developer'] is False:raise RuntimeError('请先开启手机开发者模式。')
     try:major=int(p.get('osVersionNumber','').split('.')[0])
     except ValueError:raise RuntimeError('未能读取手机系统版本，请重新检测。') from None
     if major<17:raise RuntimeError('iOS 16 本地无线自动启动尚未适配，请使用 USB 或远程已有 WDA 模式。')

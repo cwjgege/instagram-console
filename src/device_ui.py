@@ -125,7 +125,7 @@ class DeviceWindow:
         if not device:
             self.detail.set('未检测到 USB iPhone。请连接、解锁、信任此电脑，然后重新检测。')
             self.signature.set('尚未配置设备。');return
-        self.detail.set(f"{device['model']} · iOS {device['ios']} · 电脑信任配对：{'已完成' if device['paired'] else '待完成'} · 开发者模式：{'已开启' if device['developer'] else '待开启'}\n设置 → 隐私与安全性 → 开发者模式；开启后需重启并确认。")
+        self.detail.set(f"{device['model']} · iOS {device['ios']} · 电脑信任配对：{'已完成' if device['paired'] else '待完成'} · 开发者模式：{'已开启' if device.get('developer') is True else '未开启' if device.get('developer') is False else '尚未确认'}\n设置 → 隐私与安全性 → 开发者模式；开启后需重启并确认。")
         apps=device.get('controller_apps')
         inventory=('手机上未发现控制组件；VPN 与设备管理没有对应开发者项是正常的，请先安装。' if apps==[] else '手机上检测到控制组件；是否可运行仍需连接验证。' if apps else '控制组件安装状态暂未读取到，请保持解锁后重新检测。')
         self.detail.set(self.detail.get()+'\n'+inventory)
@@ -136,7 +136,10 @@ class DeviceWindow:
         record=dm.signing_record(device['udid']);state,remaining=dm.expiry_state(record,int(self.panel.cfg.get('signature_warn_hours',48)))
         self.signature.set('签名：尚未安装，请点击下方安装按钮。' if not record else
             f"签名：{'已到期' if state=='expired' else '即将到期' if state=='soon' else '有效'} · 到期 {record['expires_at'][:10]} · 团队 {record['team_id']}")
-        if pending and pending.get('status')!='ready':self.signature.set('配置阶段：'+pending.get('stage','未完成')+' · '+pending.get('message','请重新检测'))
+        if pending and pending.get('status')!='ready':
+            message=pending.get('message','请重新检测')
+            if pending.get('code') in ('developer_mode','developer_mode_unconfirmed') and device.get('developer') is True:message='开发者模式已重新确认开启，请继续安装或验证组件。'
+            self.signature.set('配置阶段：'+pending.get('stage','未完成')+' · '+message)
         if record:
             if hasattr(self,'verify_button') and not self.busy and state not in ('unknown','expired'):self.verify_button.configure(state='normal')
             team=record['team_id'];self.team.set(next((label for label,value in self.team_map.items() if value==team),team))

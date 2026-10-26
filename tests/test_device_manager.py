@@ -94,3 +94,36 @@ class DeviceSetup(unittest.TestCase):
   with lock_device(self.device['udid']):pass
 
 if __name__=='__main__':unittest.main()
+
+class DeveloperModeDetection(unittest.TestCase):
+ def device(self,**kwargs):return {'udid':'00008030-0011223344556677','paired':True,'developer':None,**kwargs}
+ def test_missing_coredevice_field_is_unknown_instead_of_disabled(self):
+  rows={'devices':[{'identifier':'core','connectionProperties':{'transportType':'wired','pairingState':'paired'},'hardwareProperties':{'deviceType':'iPhone','udid':'00008030-0011223344556677'},'deviceProperties':{'osVersionNumber':'27.0.1'}}]}
+  self.assertIsNone(dm.wired_iphones(rows)[0]['developer'])
+ def test_lockdown_true_resolves_missing_xcode_field(self):
+  d=self.device()
+  with patch('runtime_manager.probe_legacy',return_value=[{**d,'developer':True}]):dm.resolve_developer_modes([d])
+  self.assertIs(d['developer'],True);self.assertEqual(d['developer_source'],'lockdown')
+ def test_other_phone_cannot_resolve_selected_phone(self):
+  d=self.device()
+  with patch('runtime_manager.probe_legacy',return_value=[self.device(udid='00008030-008899AABBCCDDEE',developer=True)]):dm.resolve_developer_modes([d])
+  self.assertIsNone(d['developer'])
+ def test_failed_or_empty_probe_remains_unknown(self):
+  for result in ([],[self.device(developer=None)],[self.device(developer=True,paired=False)]):
+   d=self.device()
+   with patch('runtime_manager.probe_legacy',return_value=result):dm.resolve_developer_modes([d])
+   self.assertIsNone(d['developer'])
+  d=self.device()
+  with patch('runtime_manager.probe_legacy',side_effect=RuntimeError('locked')):dm.resolve_developer_modes([d])
+  self.assertIsNone(d['developer'])
+ def test_explicit_disabled_is_preserved_and_does_not_probe(self):
+  d=self.device(developer=False)
+  with patch('runtime_manager.probe_legacy') as probe:dm.resolve_developer_modes([d])
+  self.assertIs(d['developer'],False);probe.assert_not_called()
+ def test_unknown_cannot_install_and_does_not_claim_mode_disabled(self):
+  with self.assertRaises(dm.SetupError) as caught:dm.validate_device(self.device(ios='27.0.1'))
+  self.assertEqual(caught.exception.code,'developer_mode_unconfirmed');self.assertIn('未读到状态不代表未开启',str(caught.exception))
+ def test_readback_false_is_not_treated_as_unknown(self):
+  d=self.device()
+  with patch('runtime_manager.probe_legacy',return_value=[self.device(developer=False)]):dm.resolve_developer_modes([d])
+  self.assertIs(d['developer'],False)
