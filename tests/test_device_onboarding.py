@@ -8,7 +8,7 @@ class Onboarding(unittest.TestCase):
  def window(self):
   w=DeviceWindow.__new__(DeviceWindow);w.panel=Mock();w.panel.worker=None;w.panel.cfg={};w.window=Mock();w.status=Mock();w.events=queue.Queue();w.busy=False
   w.devices=[];w.device_box=Mock();w.team_box=Mock();w.team=Mock();w.device=Mock();w.environment=Mock();w.team_map={};w.show_device=Mock()
-  w.install_button=Mock();w.use_button=Mock();w.progress=Mock();w.selected=Mock(return_value={'udid':'A'*20,'name':'Test iPhone'})
+  w.wireless_button=Mock();w.wireless_check=Mock();w.install_button=Mock();w.use_button=Mock();w.progress=Mock();w.selected=Mock(return_value={'udid':'A'*20,'name':'Test iPhone'})
   return w
  def test_missing_signing_record_blocks_selection_and_explains(self):
   w=self.window()
@@ -28,4 +28,16 @@ class Onboarding(unittest.TestCase):
   with tempfile.TemporaryDirectory() as folder,patch.object(dm,'DATA',Path(folder)):
    caps=dm.make_payload({'udid':'A'*20,'name':'Test'},'ABCDE12345')['capabilities']['alwaysMatch']
   self.assertFalse(caps['appium:useNewWDA']);self.assertTrue(caps['appium:showXcodeLog']);self.assertTrue(caps['appium:allowProvisioningDeviceRegistration']);self.assertNotIn('appium:allowProvisioningUpdates',caps)
+ def test_wireless_failure_preserves_successful_component_install(self):
+  w=self.window();device={'udid':'A'*20};record={'bundle_id':'com.example'}
+  with patch('device_ui.ws.prepare',side_effect=RuntimeError('phone offline')):w.finish_install(device,record,True)
+  self.assertEqual(w.events.get(),('installed',(device,record)));self.assertEqual(w.events.get()[0],'wireless_failed')
+ def test_wireless_preparation_can_be_opted_out(self):
+  w=self.window()
+  with patch('device_ui.ws.prepare') as prepare:w.finish_install({'udid':'A'*20},{},False)
+  prepare.assert_not_called();self.assertEqual(w.events.get()[0],'installed');self.assertTrue(w.events.empty())
+ def test_ios16_keeps_usb_without_trying_unsupported_wireless(self):
+  w=self.window()
+  with patch('device_ui.ws.prepare') as prepare:w.finish_install({'udid':'A'*20,'ios':'16.7'},{},True)
+  prepare.assert_not_called();self.assertEqual(w.events.get()[0],'installed');self.assertEqual(w.events.get()[0],'wireless_failed')
 if __name__=='__main__':unittest.main()

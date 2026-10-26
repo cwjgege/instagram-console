@@ -110,7 +110,8 @@ class LocationManager:
                         if self.states.get(udid,{}).get('phase')=='applied':self.states[udid]['checked_at']=time.time()
                     elif event in ('error','restore_unknown'):
                         detail=str(value.get('error','连接中断'))[:1200]
-                        self._state(udid,'unknown','定位未确认：'+detail+'\n请检查手机解锁、开发者模式及 Xcode 设备准备状态。')
+                        message=('未发现这台手机的 USB / 无线配对连接。请插 USB，在“连接与签名”点击“准备无线连接”，按提示拔线验证；无需反复重签名。' if 'usbmux has no device' in detail else detail+'\n请检查手机解锁、开发者模式及 Xcode 设备准备状态。')
+                        self._state(udid,'unknown','定位未确认：'+message)
             p.wait(timeout=3)
         except Exception as exc:
             with self.lock:

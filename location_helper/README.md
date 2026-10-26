@@ -1,8 +1,12 @@
 # Fixed location helper
 
 This helper is GPL-3.0-or-later. It is a separate per-device executable that
-communicates with the GUI over JSON lines on stdin/stdout. It only accepts
-`set` (UDID, latitude, longitude) and `clear` (UDID). No trajectories or social
+communicates with the GUI over JSON lines on stdin/stdout. Its JSON protocol accepts
+`set` (UDID, latitude, longitude) and `clear` (UDID). It also exposes
+`--prepare-wireless UDID` to enable and read back trusted Wi-Fi pairing over USB,
+and `--check-wireless UDID` to check the Network developer-location channel
+without setting or clearing a position. Both verify the selected physical UDID.
+No trajectories or social
 network actions are implemented. This license does not grant rights to unrelated
 third-party components; their notices are supplied in `licenses/location`.
 

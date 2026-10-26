@@ -7,12 +7,13 @@ import tkinter as tk
 from tkinter import ttk,messagebox
 from pathlib import Path
 from app_paths import DATA,FROZEN
+import wireless_setup as ws
 import device_manager as dm
 import ui_theme as ui
 
 class DeviceWindow:
     def __init__(self,panel):
-        self.panel=panel;self.events=queue.Queue();self.busy=False;self.devices=[];self.team_map={}
+        self.panel=panel;self.events=queue.Queue();self.busy=False;self.devices=[];self.team_map={};self.awaiting_wireless=None;self.wireless_stop=threading.Event();self.wireless_running=False
         self.window=tk.Toplevel(panel.root);self.window.title('设备配置与签名')
         self.window.geometry(f'820x{min(800,max(560,self.window.winfo_screenheight()-100))}')
         self.window.minsize(620,540)
@@ -33,7 +34,7 @@ class DeviceWindow:
         self.canvas.bind('<Configure>',lambda event:self.resize_form(event,body))
         ui.bind_form_scroll(self.window,self.canvas,body)
         ttk.Label(body,text='连接 iPhone，完成首次配置',font=('PingFang SC',20,'bold')).pack(anchor='w')
-        ttk.Label(body,text='1  检查 Xcode  →  2  选择 USB 设备  →  3  签名安装  →  4  开始使用',wraplength=720).pack(anchor='w',pady=(8,16))
+        ttk.Label(body,text='1  检查 Xcode  →  2  选择 USB 设备  →  3  签名安装  →  4  拔线验证 Wi-Fi',wraplength=720).pack(anchor='w',pady=(8,16))
         self.environment=tk.StringVar(value='正在检测环境…')
         ttk.Label(body,textvariable=self.environment,wraplength=720).pack(anchor='w')
         row=ttk.Frame(body);row.pack(fill='x',pady=(8,16))
@@ -50,6 +51,13 @@ class DeviceWindow:
         self.team=tk.StringVar();self.team_box=ttk.Combobox(body,textvariable=self.team)
         self.team_box.pack(fill='x')
         ttk.Label(body,text='检测不到团队时：在 Xcode → Settings → Accounts 登录开发账号，\n完成证书配置后重新检测；也可输入该账号的 10 位 Team ID。',wraplength=710).pack(anchor='w',pady=(6,12))
+        self.auto_wireless=tk.BooleanVar(value=True)
+        self.wireless_check=ttk.Checkbutton(body,text='组件就绪后自动准备无线连接，拔线后验证并切换 Wi-Fi',variable=self.auto_wireless)
+        self.wireless_check.pack(anchor='w',pady=(4,6))
+        self.wireless_status=tk.StringVar(value='首次仍需 USB 信任与开发者模式；无线开关由软件配置，无需另去 Finder。')
+        ttk.Label(body,textvariable=self.wireless_status,wraplength=710,style='Muted.TLabel').pack(fill='x')
+        self.wireless_button=ttk.Button(body,text='准备无线连接（无需重签名）',command=self.prepare_wireless)
+        self.wireless_button.pack(anchor='w',pady=(6,12))
         self.signature=tk.StringVar(value='尚未读取签名。')
         ttk.Label(body,textvariable=self.signature,wraplength=710).pack(anchor='w')
         row=ttk.Frame(body);row.pack(fill='x',pady=(10,10))
@@ -88,6 +96,7 @@ class DeviceWindow:
         if self.busy:return
         self.busy=True;self.install_button.configure(state='disabled');self.use_button.configure(state='disabled')
         if hasattr(self,'verify_button'):self.verify_button.configure(state='disabled')
+        self.wireless_button.configure(state='disabled');self.wireless_check.configure(state='disabled')
         self.device_box.configure(state='disabled');self.team_box.configure(state='disabled');self.progress.start(12)
         selected=self.selected()
         log_root=dm.device_dir(selected['udid']) if selected else DATA
@@ -117,7 +126,7 @@ class DeviceWindow:
 
     def auto_scan(self):
         if not self.window.winfo_exists():return
-        if not self.busy and not (self.panel.worker and self.panel.worker.is_alive()):self.scan()
+        if not self.busy and not self.awaiting_wireless and not (self.panel.worker and self.panel.worker.is_alive()):self.scan()
         self.window.after(15000,self.auto_scan)
 
     def show_device(self):
@@ -126,6 +135,7 @@ class DeviceWindow:
             self.detail.set('未检测到 USB iPhone。请连接、解锁、信任此电脑，然后重新检测。')
             self.signature.set('尚未配置设备。');return
         self.detail.set(f"{device['model']} · iOS {device['ios']} · 电脑信任配对：{'已完成' if device['paired'] else '待完成'} · 开发者模式：{'已开启' if device.get('developer') is True else '未开启' if device.get('developer') is False else '尚未确认'}\n设置 → 隐私与安全性 → 开发者模式；开启后需重启并确认。")
+        self.wireless_status.set(ws.state(device['udid']).get('message','无线连接尚未准备；安装成功后可自动配置。'))
         apps=device.get('controller_apps')
         inventory=('手机上未发现控制组件；VPN 与设备管理没有对应开发者项是正常的，请先安装。' if apps==[] else '手机上检测到控制组件；是否可运行仍需连接验证。' if apps else '控制组件安装状态暂未读取到，请保持解锁后重新检测。')
         self.detail.set(self.detail.get()+'\n'+inventory)
@@ -153,9 +163,11 @@ class DeviceWindow:
         team=self.team_map.get(self.team.get(),self.team.get().strip())
         if not __import__('re').fullmatch('[A-Z0-9]{10}',team):
             self.status.set('请选择签名团队，或输入正确的 10 位 Team ID。');return
+        self.wireless_stop.set();self.awaiting_wireless=None
+        auto=self.auto_wireless.get()
         def job():
             record=dm.provision(device,team,lambda message:self.events.put(('status',message)))
-            self.events.put(('installed',(device,record)))
+            self.finish_install(device,record,auto)
         self.last_result=''
         self.status.set('正在安装并验证控制组件；手机出现图标后仍需等待完成。')
         self.task(job)
@@ -165,10 +177,49 @@ class DeviceWindow:
         if self.panel.worker and self.panel.worker.is_alive():self.status.set('请先停止浏览，再验证控制组件。');return
         device=self.selected()
         if not device:self.status.set('请先连接并选择 USB iPhone。');return
+        self.wireless_stop.set();self.awaiting_wireless=None
+        auto=self.auto_wireless.get()
         def job():
             record=dm.verify_provision(device,lambda message:self.events.put(('status',message)))
-            self.events.put(('installed',(device,record)))
+            self.finish_install(device,record,auto)
         self.last_result='';self.status.set('正在验证已安装组件，保留现有签名和安装。');self.task(job)
+
+    def finish_install(self,device,record,auto):
+        result=None;error=None
+        if auto and str(device.get('ios','')).split('.')[0]=='16':
+            error='iOS 16 本地无线控制暂不支持，请保留 USB 使用'
+        elif auto:
+            try:result=ws.prepare(device['udid'],lambda message:self.events.put(('status',message)))
+            except Exception as exc:error=str(exc)
+        self.events.put(('installed',(device,record)))
+        if result:self.events.put(('wireless_prepared',device))
+        elif error:self.events.put(('wireless_failed','组件已就绪，但无线准备未完成：'+error+'。USB 仍可使用；可点击“准备无线连接”重试。'))
+
+    def prepare_wireless(self):
+        if self.busy:return
+        device=self.selected()
+        if not device:self.status.set('请先连接并选择 USB iPhone。');return
+        if str(device.get('ios','')).split('.')[0]=='16':self.status.set('iOS 16 本地无线控制暂不支持，请保留 USB 使用。');return
+        if self.panel.worker and self.panel.worker.is_alive():self.status.set('请先停止该手机的浏览任务，再准备无线连接。');return
+        self.wireless_stop.set();self.wireless_stop=threading.Event();self.awaiting_wireless=None
+        def job():
+            ws.prepare(device['udid'],lambda message:self.events.put(('status',message)))
+            self.events.put(('wireless_prepared',device))
+        self.task(job)
+
+    def wait_for_unplug(self,device):
+        self.wireless_stop.set();self.wireless_stop=threading.Event();stop=self.wireless_stop
+        self.awaiting_wireless=device
+        message=ws.state(device['udid']).get('message','请拔掉 USB，保持同一 Wi-Fi 和解锁。')
+        self.wireless_status.set(message);self.last_result=message;self.status.set(message)
+        def watch():
+            while not stop.wait(1):
+                try:
+                    if not ws.wired(device['udid']):
+                        if not stop.is_set():self.events.put(('wireless_unplugged',(device,stop)))
+                        return
+                except OSError:pass
+        threading.Thread(target=watch,daemon=True).start()
 
     def use_device(self):
         device=self.selected()
@@ -237,8 +288,23 @@ class DeviceWindow:
                     self.show_device();self.use_device()
                     if dm.expiry_state(record,self.panel.cfg.get('signature_warn_hours',48))[0]=='soon':
                         self.status.set('重新签名安装已完成，但有效期仍临近到期。请在 Xcode 更新证书或描述文件后重试。')
+                elif event=='wireless_prepared':self.wait_for_unplug(value)
+                elif event=='wireless_failed':
+                    self.last_result=value;self.status.set(value)
+                elif event=='wireless_unplugged':
+                    device,stop=value
+                    if stop.is_set() or self.awaiting_wireless is not device:continue
+                    self.awaiting_wireless=None;self.wireless_running=True
+                    def job(device=device,stop=stop):
+                        result=ws.verify(device['udid'],stop,lambda message:self.events.put(('status',message)))
+                        self.events.put(('wireless_verified',result))
+                    self.task(job)
+                elif event=='wireless_verified':
+                    self.last_result=value['message'];self.status.set(value['message']);self.wireless_status.set(value['message'])
+                    if hasattr(self.panel,'store'):self.panel.refresh()
                 elif event=='done':
-                    self.busy=False;self.progress.stop()
+                    self.busy=False;self.wireless_running=False;self.progress.stop()
+                    self.wireless_button.configure(state='normal');self.wireless_check.configure(state='normal')
                     self.install_button.configure(state='normal');self.use_button.configure(state='normal')
                     self.device_box.configure(state='readonly');self.team_box.configure(state='normal')
                     self.show_device()
@@ -250,5 +316,7 @@ class DeviceWindow:
 
     def close(self):
         if self.busy:
+            if self.wireless_running:self.wireless_stop.set();self.status.set('正在取消无线验证，请等待当前检查结束后关闭。');return
             self.status.set('配置仍在进行，请等待结束后关闭。');return
+        self.wireless_stop.set();self.awaiting_wireless=None
         self.panel.device_window=None;self.window.destroy()

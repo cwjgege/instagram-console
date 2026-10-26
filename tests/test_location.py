@@ -54,6 +54,15 @@ class Protocol(unittest.IsolatedAsyncioTestCase):
   with self.assertRaises(ValueError):await self.run_requests([dict(action='set',udid=ONE,latitude=100,longitude=2)],b)
   self.assertEqual(b.calls,[])
 
+class WirelessProtocol(unittest.IsolatedAsyncioTestCase):
+ async def test_wireless_check_never_sets_or_clears_location(self):
+  backend=Backend()
+  with patch.object(worker,'DeviceBackend',return_value=backend) as factory,patch('sys.stdout',new_callable=io.StringIO) as output:
+   await worker.wireless_command('--check-wireless',ONE)
+  factory.assert_called_once_with(connection_type='Network')
+  self.assertEqual(backend.calls,[('connect',ONE),('verify',ONE)])
+  self.assertEqual(json.loads(output.getvalue())['transport'],'Network')
+
 STUB='''import json,sys
 for line in sys.stdin:
  r=json.loads(line)

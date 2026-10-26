@@ -53,11 +53,12 @@ async def serve(reader,backend=None):
             request=json.loads(raw)
 
 class DeviceBackend:
+    def __init__(self,connection_type=None):self.connection_type=connection_type
     async def __aenter__(self):self.stack=AsyncExitStack();await self.stack.__aenter__();return self
     async def __aexit__(self,*args):return await self.stack.__aexit__(*args)
     async def connect(self,udid):
         from pymobiledevice3.lockdown import create_using_usbmux
-        self.lockdown=await create_using_usbmux(serial=udid,autopair=False)
+        self.lockdown=await create_using_usbmux(serial=udid,autopair=False,connection_type=self.connection_type)
         self.stack.push_async_callback(self.lockdown.close)
         actual=await self.lockdown.get_value(key='UniqueDeviceID')
         if normalize(actual)!=normalize(udid):raise RuntimeError('设备编号不匹配，未修改定位。')
@@ -84,6 +85,23 @@ class DeviceBackend:
     async def set(self,lat,lon):await self.location.set(lat,lon)
     async def clear(self):await self.location.clear()
 
+async def wireless_command(action,udid):
+    validate({'action':'clear','udid':udid})
+    if action=='--prepare-wireless':
+        from pymobiledevice3.lockdown import create_using_usbmux
+        client=await create_using_usbmux(serial=udid,autopair=False,connection_type='USB')
+        try:
+            if normalize(client.udid)!=normalize(udid) or not client.paired:raise RuntimeError('设备配对不匹配，未修改无线设置。')
+            before=await client.get_enable_wifi_connections()
+            if not before:await client.set_enable_wifi_connections(True)
+            if await client.get_enable_wifi_connections() is not True:raise RuntimeError('手机尚未确认开启无线配对。')
+            emit('wireless_prepared',udid=udid,enabled=True,changed=not before)
+        finally:await client.close()
+    else:
+        async with DeviceBackend(connection_type='Network') as backend:
+            await backend.connect(udid);await backend.verify(udid)
+            emit('wireless_checked',udid=udid,transport='Network')
+
 async def main():
     import certifi
     os.environ['SSL_CERT_FILE']=certifi.where()
@@ -96,6 +114,10 @@ async def main():
         from pymobiledevice3.services.simulate_location import DtSimulateLocation
         assert version('pymobiledevice3')==PIN
         emit('self_test',version=PIN);return
+    if len(sys.argv)==3 and sys.argv[1] in ('--prepare-wireless','--check-wireless'):
+        try:await asyncio.wait_for(wireless_command(sys.argv[1],sys.argv[2]),40)
+        except Exception as exc:emit('error',error=type(exc).__name__+': '+str(exc)[:600]);raise SystemExit(1)
+        return
     reader=asyncio.StreamReader(limit=8192)
     await asyncio.get_running_loop().connect_read_pipe(lambda:asyncio.StreamReaderProtocol(reader),sys.stdin)
     try:await serve(reader)

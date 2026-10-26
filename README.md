@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.14**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.15**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.14 定位自动保持测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.14/Instagram-Console-1.2.14-AppleSilicon.dmg)
+[下载 v1.2.15 首次配置优化测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.15/Instagram-Console-1.2.15-AppleSilicon.dmg)
 
-[查看 v1.2.14 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.14)
+[查看 v1.2.15 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.15)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -252,3 +252,9 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 ## 1.2.14 修复定位服务状态读取
 
 修复 WDA 等待定位服务状态时向主队列回传结果，导致状态始终未知的问题。td’s iPhone / iOS 27.0.1 实测已读到始终授权、精确位置、定位服务开启和有效位置样本。首次验证复用现有签名。旧的远程连接配置需按手机当前实际连接方式重新验证，不会擅自覆盖。
+
+## 1.2.15 自动准备无线连接
+
+首次 USB 信任、开发者模式和签名安装仍需完成。向导默认勾选自动准备无线连接，在组件就绪后开启手机的已配对无线连接并读回确认，无需另开 Finder。旧设备可用“准备无线连接（无需重签名）”单独补做。拔掉 USB 后，向导自动验证 Network 定位开发通道和本机已签名 WDA；两项通过、设备身份正确、USB 仍未插回且未取消时才保存并切换本地 Wi-Fi。验证不修改坐标，无线失败保留原连接方式，组件安装结果独立保留。关闭等待窗口取消监测；验证过程中关闭会请求取消。手机需解锁并在同一可互通 Wi-Fi，iOS 16 本地无线控制仍需保留 USB。
+
+验证：354 项自动检查通过，覆盖无线准备失败与组件安装结果分离、关闭自动准备、取消、USB 未拔除或验证中重新插入、错误设备身份和组件不匹配时不保存连接。iPhone 11 / iOS 27.0.1 已完成自动开启配对与真实拔线后的 Network 定位服务、Wi-Fi WDA 两通道验证，并成功切换本地 Wi-Fi；验证没有修改手机坐标。
