@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.13**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.14**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.13 定位自动保持测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.13/Instagram-Console-1.2.13-AppleSilicon.dmg)
+[下载 v1.2.14 定位自动保持测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.14/Instagram-Console-1.2.14-AppleSilicon.dmg)
 
-[查看 v1.2.13 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.13)
+[查看 v1.2.14 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.14)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -248,3 +248,7 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 首次连接的“Unable to Verify App”与设备管理里的手动信任分开提示：组件可能需要 Apple 在线验证；没有信任条目时检查手机到 ppq.apple.com 的 HTTPS 连接和 VPN/代理，不自动重建证书。安装新版组件时只停止原手机上已确认属于本次 bundle 的旧进程，避免 Appium 直接复用旧控件而跳过更新；不主动卸载旧组件。
 
 验证：340 项自动检查通过，覆盖新鲜度/权限/身份、抖动、纠偏预算、恢复竞争、多设备隔离与 WDA 补丁。iPhone 11 / iOS 27.0.1 完成两轮实机偏移和恢复；第二轮通过 Wi-Fi 读到 1912.56 米偏差，约 4.25 秒后读到目标偏差 0 米。测试保留 USB 用于开发连接，位置读回走 Wi-Fi，未证明拔线后的完整链路或长时间稳定性。停止并恢复后读取了 19 个新位置样本，未被守护改回目标。测试结束已发送恢复真实位置指令，自动保持关闭。
+
+## 1.2.14 修复定位服务状态读取
+
+修复 WDA 等待定位服务状态时向主队列回传结果，导致状态始终未知的问题。td’s iPhone / iOS 27.0.1 实测已读到始终授权、精确位置、定位服务开启和有效位置样本。首次验证复用现有签名。旧的远程连接配置需按手机当前实际连接方式重新验证，不会擅自覆盖。

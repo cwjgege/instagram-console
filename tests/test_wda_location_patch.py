@@ -16,5 +16,5 @@ class LocationPatch(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);file=root/'WebDriverAgentLib/Commands/FBCustomCommands.m';file.parent.mkdir(parents=True);file.write_text(SOURCE)
    self.assertTrue(patch(root));once=file.read_text();self.assertFalse(patch(root));self.assertEqual(file.read_text(),once)
-   for required in ('handleNext','IGLocationReadbackDelegate','horizontalAccuracy','timestamp','deviceFingerprint','accuracyAuthorization','stopUpdatingLocation','[NSNull null]','dispatch_get_global_queue'):self.assertIn(required,once)
+   for required in ('handleNext','IGLocationReadbackDelegate','horizontalAccuracy','timestamp','deviceFingerprint','accuracyAuthorization','stopUpdatingLocation','[NSNull null]','locationServicesEnabled'):self.assertIn(required,once)
    self.assertEqual(once.count('+ (id<FBResponsePayload>)handleStopLocationReadback:'),1)

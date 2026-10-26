@@ -19,13 +19,10 @@ METHOD=r'''+ (id<FBResponsePayload>)handleGetLocation:(FBRouteRequest *)request
   if (auth == kCLAuthorizationStatusNotDetermined) {
     [IGLocationManager requestAlwaysAuthorization];
   }
-  __block NSNumber *servicesEnabled = nil;
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-    BOOL value = [CLLocationManager locationServicesEnabled];
-    dispatch_async(dispatch_get_main_queue(), ^{ servicesEnabled = @(value); });
-  });
-  [[[FBRunLoopSpinner new] timeout:0.2] spinUntilTrue:^BOOL{ return servicesEnabled != nil; }];
-  BOOL enabled = servicesEnabled.boolValue;
+  // Resolve synchronously: dispatching the completion back to the main queue
+  // while this WDA command waits can leave every response permanently unknown.
+  BOOL enabled = [CLLocationManager locationServicesEnabled];
+  NSNumber *servicesEnabled = @(enabled);
   if (enabled && (auth == kCLAuthorizationStatusAuthorizedAlways || auth == kCLAuthorizationStatusAuthorizedWhenInUse)) {
     [IGLocationManager startUpdatingLocation];
   }
