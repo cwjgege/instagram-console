@@ -48,6 +48,8 @@ class Fleet:
         self.cfg=copy.deepcopy(self.store.template);self.cfg['device_udid']='';self.worker=None
         self.on_device_selected=self.selected_device_ready;self.signature_notices=set()
         self.pending_starts={};self.pending_all=None;self.last_refresh=None;self._view_cache={}
+        from location_manager import LocationManager
+        self.locations=LocationManager();self.location_windows={};self.location_shutdown=False
         self.next_network_check=time.monotonic()+15
         ui.apply(root);root.title(f'Instagram 控制台 {APP_VERSION} · 设备工作区')
         root.geometry(f'{min(1260,root.winfo_screenwidth()-60)}x{min(780,root.winfo_screenheight()-100)}');root.minsize(1000,640)
@@ -93,16 +95,18 @@ class Fleet:
         handoff=ttk.Frame(detail);handoff.pack(fill='x',pady=(8,0))
         self.pause_selected_button=ttk.Button(handoff,text='暂停托管',command=lambda:self.hosting_action('pause_hosting'));self.pause_selected_button.pack(side='left')
         self.resume_selected_button=ttk.Button(handoff,text='继续托管',command=lambda:self.hosting_action('resume_hosting'));self.resume_selected_button.pack(side='left',padx=8)
+        self.location_button=ttk.Button(handoff,text='固定定位',command=self.open_location);self.location_button.pack(side='right')
         self.config_button=ttk.Button(actions,text='配置与日志',command=self.open_selected);self.config_button.pack(side='left')
         self.setup_button=ttk.Button(actions,text='连接与签名',command=self.setup_selected);self.setup_button.pack(side='right')
         self.connection_button=ttk.Button(actions,text='连接方式',command=self.open_connection);self.connection_button.pack(side='left',padx=8)
         footer=ttk.Frame(body,style='Workspace.TFrame');footer.pack(side='bottom',fill='x',pady=(12,0),before=workspace)
         self.status=tk.StringVar(value='连接检测通常需要几秒，期间可以安排开始。')
         self.status_label=ttk.Label(footer,textvariable=self.status,wraplength=850,style='Workspace.TLabel');self.status_label.pack(fill='x')
-        ttk.Label(footer,text='⌘ Return 全部开始    Esc 全部停止    双击设备打开配置',style='Workspace.TLabel',font=('PingFang SC',10)).pack(anchor='w',pady=(6,0))
+        ttk.Label(footer,text='⌘ Return 全部开始    Esc 全部停止    ⌘ L 固定定位    双击设备打开配置',style='Workspace.TLabel',font=('PingFang SC',10)).pack(anchor='w',pady=(6,0))
         self.device_label=tk.StringVar();root.protocol('WM_DELETE_WINDOW',self.close);root.createcommand('tk::mac::Quit',self.close)
         root.bind('<Escape>',lambda _:self.stop_all());root.bind('<Command-Return>',lambda _:self.start_all())
         root.bind('<Command-k>',lambda _:self.add_network())
+        root.bind('<Command-l>',lambda _:self.open_location())
         root.bind('<Configure>',lambda event:self.resize(event),add='+')
         root.bind('<Destroy>',lambda e:self.preview.close() if e.widget==root else None,add='+')
         self.update_detail();root.after(100,self.refresh);root.after(200,self.poll)
@@ -204,8 +208,9 @@ class Fleet:
         if self.__dict__.get('preview'):self.preview.select(udid,item[0].get('device_name','iPhone') if item else '手机画面')
         if not item:
             self.detail_title.set('尚未选择设备');self.detail_meta.set('');self.detail_status.set('请选择要操作的设备。')
-            for button in (self.start_selected_button,self.stop_selected_button,self.config_button,self.setup_button,self.connection_button):button.configure(state='disabled')
+            for button in (self.start_selected_button,self.stop_selected_button,self.config_button,self.setup_button,self.connection_button,self.location_button):button.configure(state='disabled')
             return
+        self.location_button.configure(state='disabled' if self.closing else 'normal')
         self.connection_button.configure(state='disabled' if self.closing or item[1]['alive'] else 'normal')
         cfg,v=item;self.detail_title.set(cfg.get('device_name','iPhone'))
         self.detail_meta.set('iOS '+cfg.get('device_ios','未知')+'   ·   '+(connections.MODES[v['mode']]+' 已就绪' if v['ready'] else '连接检测中' if self.scanning else connections.MODES[v['mode']]+' 未就绪')+'   ·   '+{'valid':'签名有效','soon':'签名即将到期','expired':'签名已到期','unknown':'尚未完成签名','external':'远端签名需当地维护'}[v['signature']])
@@ -214,6 +219,15 @@ class Fleet:
         self.start_selected_button.configure(state='normal' if can_start else 'disabled',text='停止后重启' if v['stopping'] else '检测后开始' if self.scanning else '开始此设备')
         self.stop_selected_button.configure(state='normal' if v['alive'] or udid in self.pending_starts else 'disabled')
         self.config_button.configure(state='disabled' if self.closing else 'normal');self.setup_button.configure(state='disabled' if self.closing or v['alive'] else 'normal')
+    def open_location(self):
+        if self.closing:return
+        udid=self.selected()
+        if not udid:return
+        if udid in self.location_windows:self.location_windows[udid].window.lift();return
+        from location_ui import LocationWindow
+        cfg=next((c for c in self.store.profiles() if c['device_udid']==udid),None)
+        if cfg:self.location_windows[udid]=LocationWindow(self,cfg)
+
     def add_network(self):
         if self.closing:return
         from connection_ui import ConnectionWindow
@@ -331,11 +345,18 @@ class Fleet:
         if self.closing:
             busy=bool(self.device_window and self.device_window.busy) or any((p.worker and p.worker.is_alive()) or (p.device_window and p.device_window.busy) for p in self.panels.values())
             busy=busy or any(w.busy for w in self.__dict__.get('connection_windows',[]))
+            busy=busy or self.__dict__.get('location_shutdown',False)
             if not busy:
                 import runtime_manager
                 runtime_manager.stop_all();self.root.destroy();return
         self.root.after(250,self.poll)
     def close(self):
+        if self.closing:return
+        self.location_shutdown=True
+        def restore_locations():
+            try:self.locations.shutdown()
+            finally:self.location_shutdown=False
+        threading.Thread(target=restore_locations,daemon=True).start()
         for window in self.__dict__.get('connection_windows',[]):window.stop_event.set()
         if self.__dict__.get('preview'):self.preview.close()
         self.closing=True;self.start_all_button.configure(state='disabled');self.add_button.configure(state='disabled');self.stop_all();self.status.set('正在结束各设备任务，完成后退出…')

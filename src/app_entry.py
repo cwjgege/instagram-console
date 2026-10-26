@@ -21,6 +21,9 @@ def self_test(output):
     result={'version':APP_VERSION,'python':sys.version.split()[0],'tk':tkinter.TkVersion,
             'pillow':PIL.Image.__version__,'tls_ca_certificates':ssl.create_default_context().cert_store_stats()['x509_ca'],'node':node,'appium':appium,
             'data_directory':str(DATA),'xcode':str(dm.xcode_directory()),'standalone':bool(getattr(sys,'frozen',False))}
+    if getattr(sys,'frozen',False):
+        from location_manager import worker_command
+        result['location_backend']=json.loads(subprocess.check_output(worker_command()+['--self-test'],text=True,timeout=30))
     dm.write_json(Path(output),result)
 
 def main():
@@ -47,10 +50,11 @@ def main():
     except BlockingIOError:
         root.withdraw();messagebox.showinfo('Instagram 控制台 '+APP_VERSION,'控制台已有实例在运行。\n升级后请先完全退出正在运行的控制台，再打开 '+APP_VERSION+'。直接打开新安装包不会切换已运行的旧版。',parent=root)
         root.destroy();return
+    fleet=None
     try:
         load_config()
         from fleet import Fleet
-        Fleet(root);root.mainloop()
+        fleet=Fleet(root);root.mainloop()
     except Exception:
         import traceback
         traceback.print_exc()
@@ -58,6 +62,7 @@ def main():
     finally:
         import device_manager
         import runtime_manager
+        if fleet is not None:fleet.locations.shutdown()
         runtime_manager.stop_all()
         device_manager.stop_owned_server()
         lock.close()

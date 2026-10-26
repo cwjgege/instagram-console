@@ -27,12 +27,14 @@ def main():
         for child in VENDOR.iterdir():bundle.add(child,arcname=child.name)
     shutil.copy2(SOURCE/'default-config.json',STAGE/'default-config.json')
     license_source=ROOT/'licenses'
+    location=Path(os.environ.get('IG_LOCATION_BACKEND',str(BUILD/'location/dist/ig-location-helper')))
+    if not (location/'ig-location-helper').is_file():raise SystemExit('Build tools/build_location.py in its isolated venv first, or set IG_LOCATION_BACKEND.')
     run([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--windowed','--onedir',
          '--name','Instagram 控制台','--target-arch','arm64','--osx-bundle-identifier','local.igconsole.desktop',
          '--distpath',ROOT/'dist','--workpath',BUILD/'pyinstaller','--specpath',BUILD,
          '--paths',SOURCE,'--collect-all','PIL','--collect-all','certifi',
          '--add-data',f'{STAGE / "default-config.json"}:.','--add-data',f'{archive}:.',
-         '--add-data',f'{license_source}:licenses','--add-data',f'{SOURCE / "resources"}:resources',SOURCE/'app_entry.py'],cwd=ROOT)
+         '--add-data',f'{location}:location-backend','--add-data',f'{license_source}:licenses','--add-data',f'{SOURCE / "resources"}:resources',SOURCE/'app_entry.py'],cwd=ROOT)
     app=ROOT/'dist/Instagram 控制台.app';info=app/'Contents/Info.plist'
     version=re.search(r"^APP_VERSION='([^']+)'",(SOURCE/'app_paths.py').read_text(),re.M)[1]
     values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString=version,CFBundleVersion=version,NSHighResolutionCapable=True,

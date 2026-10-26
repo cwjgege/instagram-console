@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.7**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.11**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.7 XCTest 无线启动测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.7/Instagram-Console-1.2.7-AppleSilicon.dmg)
+[下载 v1.2.11 固定定位与地图测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.11/Instagram-Console-1.2.11-AppleSilicon.dmg)
 
-[查看 v1.2.7 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.7)
+[查看 v1.2.11 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.11)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -208,3 +208,23 @@ API Key 只存于当前应用进程；使用模型服务会将采样内容发送
 验证：269 项自动检查通过，覆盖启动命令、测试产物路径、签名身份隔离、缺失产物、无预先隧道地址、重复发现档案的合并/锁定/回滚及已有网络行为。发布包另做版本、签名、独立运行依赖和压缩包完整性检查。本版为预发布，保留 USB 恢复路径。
 
 上游问题与对照依据：[Appium #22636](https://github.com/appium/appium/issues/22636)。
+
+## 1.2.11 固定定位与地图选点（测试版）
+
+固定定位已集成在设备工作区：选中手机 → **固定定位**。可输入经纬度、填入纽约，或打开“地图搜索与选点”搜索城市/地址/地标、选择结果、拖动/缩放地图并点击选点。“使用此位置”只填回坐标，点击“设置定位”才发送到当前手机。各设备分别连接，支持多台手机独立保持固定位置；不包含轨迹。
+
+定位使用单独打包的 pymobiledevice3 11.44.0，无需用户安装 Python。首次必须先完成 USB 信任、开发者模式、Xcode 设备准备；已有 WDA 地址不能代替开发者配对。iOS 16 使用旧开发服务，iOS 17.4+ 使用用户态隧道；17.0–17.3 暂不支持。Wi-Fi 需要手机已经配对并能通过网络发现；请先用 USB 验证。较新 iOS、无线定位与浏览同时运行仍待实机验收。
+
+“定位服务已接受坐标”不代表读回真实 GPS；恢复操作仅发送恢复指令，请在手机地图确认。关闭定位窗口保留连接；退出整个软件会尝试恢复并结束本软件创建的定位进程。连接中断、程序被强制结束、手机离线时不能保证恢复；请重新连接并恢复，或重启手机后在地图确认。重新打开软件不会将上次保存的坐标误报为正在生效。
+
+地图需要联网。搜索词发往 Photon 公共演示服务，地图视野请求发往 OpenStreetMap；不发送设备编号或自动化日志。不读取手机实际 GPS，不自动反向查询地址。仅点击搜索/回车发起查询，每秒最多一次并缓存结果；仅加载当前可见地图，不预下载地图。公共服务可能限流或不可达，可继续手动填坐标或使用纽约预设。地图数据 © OpenStreetMap contributors，ODbL。服务说明：[Photon](https://github.com/komoot/photon#demo-server)、[OSM 地图使用政策](https://operations.osmfoundation.org/policies/tiles/)、[数据版权](https://www.openstreetmap.org/copyright)。
+
+如需切换服务，在应用数据目录添加 `map-provider.json`（HTTPS，Photon 响应格式/标准 256px XYZ PNG）：
+
+```json
+{"search":"https://photon.komoot.io/api/","tiles":"https://tile.openstreetmap.org/{z}/{x}/{y}.png"}
+```
+
+定位辅助程序按 GPL-3.0-or-later 提供，许可证见 `location_helper/COPYING`，第三方声明见 `licenses/location`。Release 同时提供定位后端及其精确依赖版本的对应源码与构建脚本。GUI 不导入该 Python 环境。构建时在独立 Python 3.14 环境安装 `location_helper/requirements.lock` 并运行 `tools/build_location.py`，然后在 GUI 构建环境运行 `tools/build_mac.py`；可通过 `IG_LOCATION_BACKEND` 指定已构建的后端目录。
+
+304 项自动检查通过，包含定位协议、双设备进程隔离、异常身份、恢复/超时、坐标投影和地图缓存检查；尚未完成本版实机定位验收。
