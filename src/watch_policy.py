@@ -37,6 +37,7 @@ def playback_finished(previous,current):
     return current>=97 or (previous is not None and previous>=65 and current<=35 and previous-current>=40)
 
 def watch_plan(post,related,rng):
+    if not related:return {'seconds':rng.uniform(2,5),'basis':'short','duration':None}
     timing=post.get('playback')
     if isinstance(timing,dict):
         elapsed,total=timing.get('elapsed'),timing.get('duration')

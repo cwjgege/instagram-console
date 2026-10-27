@@ -26,6 +26,7 @@ from page_state import (PageBlocked, classify, visible_nodes, screen_height, sea
 from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
 from session_context import current as session_context
 from watch_policy import playback_timing,playback_progress,playback_finished,watch_plan
+from watch_relevance import watch_related as caption_watch_related
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
 class ManualResume(BaseException):
@@ -610,9 +611,9 @@ class Runner:
             current={**plan,'key':key,'deadline':anchor+plan['seconds'],'fallback_deadline':anchor+(10 if related else 5)}
             self.video_watch=current
         remaining=max(0,current['deadline']-now)
-        self.log('watch_timing',message={'duration':'按视频进度安排观看','progress':'观察播放进度，接近结束即翻页','fallback':'未读取到可靠进度，使用短停留上限'}[current['basis']],
+        self.log('watch_timing',message={'duration':'按视频进度安排观看','progress':'观察播放进度，接近结束即翻页','fallback':'未读取到可靠进度，使用短停留上限','short':'不相关内容，随机短看后跳过'}[current['basis']],
                  timing_source=current['basis'],duration=current['duration'],remaining_seconds=round(remaining,2))
-        progress=post.get('progress') if key else None;unchanged_since=now
+        progress=post.get('progress') if key and current['basis']!='short' else None;unchanged_since=now
         if remaining<=0:return
         if progress is None:
             self.wait(remaining);return
@@ -766,6 +767,9 @@ class Runner:
         # Advance even when the visible button was already active or unavailable.
         # An uncertain write raises above and is never retried here.
         self.like_next=len(self.like_seen)+self.rng.randint(self.cfg['like_interval_min'],self.cfg['like_interval_max'])
+
+    def watch_related(self,post):
+        return caption_watch_related(post,self.cfg['keywords'],self.cfg['relevance_terms'],self.cfg['exclude_keywords'])
 
     def related(self, post):
         caption = post['caption'].casefold()
@@ -1218,6 +1222,7 @@ class Runner:
             self.unchanged_swipes=0
             if after.get('key') and getattr(self,'_visible_video_key',None)==after['key']:
                 self._visible_video_since=min(self._visible_video_since,transition_started)
+        self.last_swipe_post=after
         self.log('page_checked',message='滑动后已确认仍在 Reels')
 
     def run(self):
@@ -1262,7 +1267,8 @@ class Runner:
                         self.skip_interactions_once=False
                         self.counts['watched']+=1
                         related=self.related(post)
-                        self.log('watch',message='观看相关视频' if related else '浏览视频',author=post['author'],related=related)
+                        viewing_related=self.watch_related(post)
+                        self.log('watch',message='观看相关视频' if viewing_related else '随机短看后跳过',author=post['author'],related=viewing_related)
                         if post['key'] and post['key']==last_key:
                             self.stagnant+=1
                         else:
@@ -1271,7 +1277,7 @@ class Runner:
                             self.refresh_required=True
                             raise NavigationLost('连续翻页后仍停留同一内容')
                         last_key=post['key']
-                        self.watch_video(post,related)
+                        self.watch_video(post,viewing_related)
                         if skip_interaction:self.log('handoff_skip',message='人工接管后的当前视频跳过互动')
                         if not skip_interaction:self.consider_like(post,related)
                         self.check()
@@ -1303,11 +1309,16 @@ class Runner:
                             self.back_depth=burst
                         else:
                             burst=self.rng.choices([1,2,3],[.8,.16,.04])[0]
+                            advanced=0
                             for _ in range(min(burst,self.cfg['max_swipes_per_run']-self.swipes)):
-                                self.swipe('up')
+                                self.last_swipe_post=None
+                                self.swipe('up');advanced+=1
+                                if self.last_swipe_post and self.watch_related(self.last_swipe_post):
+                                    self.log('watch_topic_found',message='连续翻页遇到相关内容，停下重新安排观看')
+                                    break
                                 if burst>1:
                                     self.wait(self.rng.uniform(1.5,3.5))
-                            self.back_depth=max(0,self.back_depth-burst)
+                            self.back_depth=max(0,self.back_depth-advanced)
                     except InteractionSkipped as exc:
                         # Preserve the pending ledger reservation and unwind the
                         # interaction before recovering navigation or transport.

@@ -462,7 +462,7 @@ class Panel:
                 if any(not english_text(reply) for reply in rule['replies']):
                     raise ValueError('评论内容请使用英文')
                 if any(len(reply)>500 for reply in rule['replies']): raise ValueError('单条评论请控制在 500 字符以内')
-            if not cfg['relevance_terms']: raise ValueError('请至少填写一个内容匹配词')
+            if not cfg['relevance_terms'] and not cfg['keywords']: raise ValueError('请至少填写一个搜索关键词或内容匹配词')
             cfg['comment_rules']=rules
             cfg['comments_mode']='ai' if self.ai_mode.get()=='AI 生成' else 'rules'
             cfg['ai_send_mode']='auto' if self.ai_send.get()=='自动发送' else 'preview'
