@@ -22,7 +22,7 @@ from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 import ai_comments
 import diagnostics
-from page_state import (PageBlocked, classify, visible_nodes, screen_height, search_input_node, search_layout, search_back_name, profile_back_name, collection_sheet_nodes, collection_sheet_close)
+from page_state import (PageBlocked, classify, visible_nodes, screen_height, search_input_node, search_layout, search_back_name, profile_back_name, collection_sheet_nodes, collection_sheet_close, deferred_apple_account_alert)
 from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
 from session_context import current as session_context
 from watch_policy import playback_timing,playback_progress,playback_finished,observed_progress,watch_plan,replay_probability
@@ -176,6 +176,7 @@ class Runner:
         self.interaction_deadline = None
         self.search_deadline = None
         self.search_overall_deadline = None
+        self.deferred_account_reminder = False
         self.video_watch = None
         self.refresh_required = False
         self.last_tree = None
@@ -353,12 +354,21 @@ class Runner:
 
     def snapshot(self):
         # App transitions can briefly return an empty/system bundle. Only retry reads:
-        # never repeat a gesture or steal foreground while checking this state.
+        # never repeat a gesture or steal foreground. Only one exactly recognized system reminder may be deferred.
         for attempt in range(3):
             self.check()
             info=self.mobile('activeAppInfo')
-            if isinstance(info,dict) and info.get('bundleId')=='com.burbn.instagram':
+            if isinstance(info,dict) and info.get('bundleId') in ('com.burbn.instagram','com.apple.springboard'):
                 tree=ET.fromstring(self.command('GET','/source'))
+                if deferred_apple_account_alert(tree) is not None:
+                    if self.deferred_account_reminder:raise PageBlocked('Apple 账号验证提示再次出现，请手动检查系统账号；本轮不再自动关闭。')
+                    found=self.command('POST','/elements',{'using':'-ios predicate string','value':"type == 'XCUIElementTypeButton' AND visible == true AND enabled == true AND label == 'Not Now'"})
+                    if len(found)!=1:raise PageBlocked('Apple 账号提示的稍后处理按钮不唯一，请手动处理。')
+                    self.deferred_account_reminder=True
+                    self.command('POST','/element/'+(found[0].get(ELEMENT) or found[0].get('ELEMENT'))+'/click',{})
+                    self.log('system_reminder_deferred',message='已暂时关闭 Apple 账号验证提醒（Not Now），未输入密码或打开设置。')
+                    self.wait(.5)
+                    continue
                 app=tree if tree.tag=='XCUIElementTypeApplication' else tree.find('.//XCUIElementTypeApplication')
                 if app is None or app.get('bundleId') in (None,'','com.burbn.instagram'):
                     self.observe(tree)

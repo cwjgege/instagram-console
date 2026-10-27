@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.25**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.26**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.25 搜索超时优化测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.25/Instagram-Console-1.2.25-AppleSilicon.dmg)
+[下载 v1.2.26 系统提醒处理测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.26/Instagram-Console-1.2.26-AppleSilicon.dmg)
 
-[查看 v1.2.25 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.25)
+[查看 v1.2.26 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.26)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -348,3 +348,7 @@ helper 就绪事件返回真实控制、预览端口及本次启动标识；GUI 
 搜索输入、结果识别、打开视频、观看和返回列表分别计时，防止正常观看耗尽后续导航预算。默认两条搜索视频的整体上限由 130 秒调整为 370 秒；随视频数、观看设置和滚动次数变化，最多 900 秒。观看时长设置保持原值，整体上限不是强制等待时长。无响应阶段仍会超时，暂停本轮搜索并尝试恢复视频浏览，日志显示具体超时阶段；手动停止和任务总时长仍优先生效。
 
 另修复无线组件日志中出现 JSON 字符串或数组时的解析异常。新版无需因此重新签名手机组件。
+
+## 1.2.26 已识别系统提醒
+
+在控制通道可用时，对本次识别的 SpringBoard Apple Account Verification 提醒点击唯一的 Not Now，每轮最多一次，随后重新核验 Instagram 前台。仅接受匹配标题、正文与两个按钮且没有输入框的弹窗；再次出现或其他验证保留手动处理。此功能暂时关闭提醒，不处理账号密码或根除账号验证问题，也不能在手机控制组件尚未启动时点击弹窗。

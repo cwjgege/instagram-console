@@ -36,6 +36,24 @@ def collection_sheet_close(tree):
     return candidates[0] if len(candidates)==1 else None
 
 
+def deferred_apple_account_alert(tree):
+    """Only the observed system reminder with an explicit deferral, never a password form."""
+    app=tree if tree.tag=='XCUIElementTypeApplication' else tree.find('.//XCUIElementTypeApplication')
+    if app is None or app.get('bundleId')!='com.apple.springboard':return None
+    nodes=visible_nodes(tree)
+    if any(e.tag in ('XCUIElementTypeSecureTextField','XCUIElementTypeTextField','XCUIElementTypeTextView','XCUIElementTypeKeyboard') for e in nodes):return None
+    alerts=[e for e in nodes if e.tag=='XCUIElementTypeAlert']
+    if len(alerts)!=1:return None
+    alert=alerts[0];title=' '.join(alert.get('label',alert.get('name','')).split()).casefold()
+    if title!='apple account verification':return None
+    scoped=visible_nodes(alert)
+    texts=[' '.join(e.get('label','').split()) for e in scoped if e.tag=='XCUIElementTypeStaticText']
+    if not any(t.startswith('Enter the password for ') and t.endswith(' in Settings.') for t in texts):return None
+    buttons=[e for e in scoped if e.tag=='XCUIElementTypeButton' and e.get('enabled','true')=='true']
+    if len(buttons)!=2 or {e.get('label') for e in buttons}!={'Not Now','Settings'}:return None
+    return next(e for e in buttons if e.get('label')=='Not Now')
+
+
 def search_input_node(tree):
     nodes=visible_nodes(tree)
     if any(e.tag in ('XCUIElementTypeAlert','XCUIElementTypeSecureTextField') or e.get('name')=='ig-partial-modal-sheet-view-controller-content' for e in nodes):return None
