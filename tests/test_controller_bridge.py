@@ -121,3 +121,28 @@ class StartupDiagnostics(unittest.TestCase):
   with tempfile.TemporaryDirectory() as folder:
    path=Path(folder)/'controller-wireless.log';path.write_text(json.dumps({'event':'error','error':'RuntimeError: 标准 Xcode 启动提前结束，退出码 65'}))
    self.assertIn('退出码 65',str(bridge.startup_failure(path,1)))
+
+class DynamicRelayPorts(unittest.TestCase):
+ def test_only_valid_actual_ports_from_this_attempt_are_accepted(self):
+  request={'relay_protocol':2,'attempt_id':'new-attempt'}
+  proof={'attempt_id':'new-attempt','local_wda':51001,'local_mjpeg':51002}
+  self.assertEqual(bridge.relay_endpoints(proof,request),('http://127.0.0.1:51001','http://127.0.0.1:51002'))
+  for change in ({'attempt_id':'old'},{'local_wda':0},{'local_wda':True},{'local_wda':65536},{'local_mjpeg':51001}):
+   with self.subTest(change=change),self.assertRaises(RuntimeError):bridge.relay_endpoints({**proof,**change},request)
+  with self.assertRaises(RuntimeError):bridge.relay_endpoints(proof,{'relay_protocol':1,'attempt_id':'new-attempt'})
+ def test_bridge_requests_os_ports_and_persists_actual_urls_without_using_usb_endpoints(self):
+  import tempfile,device_manager as dm,connections as cn
+  with tempfile.TemporaryDirectory() as folder,patch.object(dm,'DATA',Path(folder)),patch.object(cn,'_PROCESSES',{}):
+   base=dm.device_dir(UDID);base.mkdir(parents=True)
+   record={'udid':UDID,'bundle_id':BUNDLE};proof={}
+   def launch(*args,**kwargs):
+    cfg=json.loads((base/'controller-request.json').read_text())
+    self.assertEqual((cfg['local_wda'],cfg['local_mjpeg']),(0,0));self.assertEqual(cfg['relay_protocol'],2)
+    proof.update(event='controller_ready',udid=UDID,bundle=BUNDLE,fingerprint='new',ios='26.6',local_wda=51001,local_mjpeg=51002,attempt_id=cfg['attempt_id'])
+    kwargs['stdout'].write((json.dumps(proof)+'\n').encode());kwargs['stdout'].flush()
+    return Mock(pid=12345,returncode=None)
+   def checked(url,pin):self.assertEqual(url,'http://127.0.0.1:51001');return dict(bundle=BUNDLE,ios='26.6',fingerprint=pin,url=url)
+   with patch.object(dm,'signing_record',return_value=record),patch.object(dm,'expiry_state',return_value=('valid',24)),patch.object(cn,'derived_path',return_value=base),patch.object(cn,'prepare_wireless_xctestrun',return_value=base/'fixture.xctestrun'),patch.object(dm,'xcode_directory',return_value=Path('/fixture')),patch.object(bridge,'worker_command',return_value=['fixture-helper']),patch.object(bridge.subprocess,'Popen',side_effect=launch),patch.object(cn,'checked',side_effect=checked),patch('runtime_manager.endpoints',side_effect=AssertionError('USB port allocation must remain separate')):
+    self.assertEqual(bridge.ensure(UDID,{'mode':'wifi'}),'http://127.0.0.1:51001')
+   runtime=json.loads((base/'network-runtime.json').read_text());self.assertEqual(runtime['preview_url'],'http://127.0.0.1:51002')
+   saved=json.loads((base/'controller-proof.json').read_text());self.assertEqual(saved,proof)

@@ -1,10 +1,10 @@
 """Own one isolated, paired wireless controller relay per phone."""
-import json,subprocess,time
+import json,subprocess,time,uuid
 from pathlib import Path
 import device_manager as dm
 import connections as cn
 from location_manager import worker_command
-from runtime_manager import endpoints,ExistingProcess
+from runtime_manager import ExistingProcess
 from runner import Halt
 
 def preferred(udid):
@@ -21,6 +21,14 @@ def accept(udid,record,proof,url,setting,stop):
         cn.save(udid,{**old,'fingerprint':proof['fingerprint'],'verified_ios':info['ios']},expected_fingerprint=old['fingerprint'],expected_setting=old,stop=stop)
     setting['fingerprint']=proof['fingerprint']
     return info
+
+def relay_endpoints(proof,request):
+    if request.get('relay_protocol')!=2 or not request.get('attempt_id') or proof.get('attempt_id')!=request['attempt_id']:
+        raise RuntimeError('无线通道启动标识不一致，未使用旧端口。')
+    wda,mjpeg=proof.get('local_wda'),proof.get('local_mjpeg')
+    if any(type(p) is not int or not 1024<p<65536 for p in (wda,mjpeg)) or wda==mjpeg:
+        raise RuntimeError('无线通道未返回有效的独立端口。')
+    return f'http://127.0.0.1:{wda}',f'http://127.0.0.1:{mjpeg}'
 
 def startup_failure(log,returncode):
     import re
@@ -42,7 +50,7 @@ def startup_failure(log,returncode):
 def ensure(udid,setting,notify=lambda s:None,stop=None):
     record=dm.signing_record(udid)
     if not record or record.get('udid')!=udid or dm.expiry_state(record)[0] in ('unknown','expired'):raise RuntimeError('此手机缺少有效的本机签名，请先完成设备配置。')
-    ports=endpoints(udid);base=dm.device_dir(udid);url=f"http://127.0.0.1:{ports['wda']}"
+    base=dm.device_dir(udid)
     with cn._LOCK:
         process=cn._PROCESSES.get(udid)
         if process is None:
@@ -56,12 +64,13 @@ def ensure(udid,setting,notify=lambda s:None,stop=None):
         if process is not None and process.poll() is None:
             try:
                 request_cfg=json.loads((base/'controller-request.json').read_text())
-                if request_cfg.get('launch_mode')!='standard':raise RuntimeError('旧版无线进程需要按新版方式重新建立。')
-                proof=json.loads((base/'controller-proof.json').read_text());info=accept(udid,record,proof,url,setting,stop)
+                if request_cfg.get('launch_mode')!='standard' or request_cfg.get('relay_protocol')!=2:raise RuntimeError('旧版无线进程需要按新版方式重新建立。')
+                proof=json.loads((base/'controller-proof.json').read_text());url,preview_url=relay_endpoints(proof,request_cfg);info=accept(udid,record,proof,url,setting,stop)
+                dm.write_json(base/'network-runtime.json',{**info,'preview_url':preview_url})
                 return url
             except (OSError,ValueError,RuntimeError):cn.stop_device(udid)
         request=base/'controller-request.json'
-        cfg={'udid':udid,'bundle':record['bundle_id'],'local_wda':ports['wda'],'local_mjpeg':ports['mjpeg'],'remote_wda':8100,'remote_mjpeg':9100,'launch_mode':'standard'}
+        cfg={'udid':udid,'bundle':record['bundle_id'],'local_wda':0,'local_mjpeg':0,'relay_protocol':2,'attempt_id':uuid.uuid4().hex,'remote_wda':8100,'remote_mjpeg':9100,'launch_mode':'standard'}
         try:
             derived=cn.derived_path(udid);cfg['remote_wda'],cfg['remote_mjpeg']=cn.wireless_ports(derived)
             cfg['xctestrun']=str(cn.prepare_wireless_xctestrun(derived,base,record['bundle_id'],cfg['remote_wda'],cfg['remote_mjpeg']))
@@ -81,9 +90,10 @@ def ensure(udid,setting,notify=lambda s:None,stop=None):
             try:proof=json.loads(line)
             except ValueError:continue
             if proof.get('event')!='controller_ready':continue
+            url,preview_url=relay_endpoints(proof,cfg)
             info=accept(udid,record,proof,url,setting,stop)
             dm.write_json(base/'controller-proof.json',proof)
-            dm.write_json(base/'network-runtime.json',{**info,'preview_url':f"http://127.0.0.1:{ports['mjpeg']}"})
+            dm.write_json(base/'network-runtime.json',{**info,'preview_url':preview_url})
             dm.write_json(base/'controller-strategy.json',{'strategy':'userspace'})
             notify('已通过配对设备编号和签名核验无线通道。');return url
         if process.poll() is not None:raise startup_failure(log,process.returncode)

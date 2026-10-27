@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.23**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.24**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.23 无线启动修复与版本显示测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.23/Instagram-Console-1.2.23-AppleSilicon.dmg)
+[下载 v1.2.24 无线端口冲突修复测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.24/Instagram-Console-1.2.24-AppleSilicon.dmg)
 
-[查看 v1.2.23 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.23)
+[查看 v1.2.24 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.24)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -334,3 +334,11 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 备用通道异常以结构化错误输出，界面和 connection-diagnostic.json 可看到更具体的启动错误，而不只提示“检查配对或解锁”。主工作区内容区和配置、连接、定位窗口固定区域显示版本号，相关标题也保留版本号。
 
 465 项自动检查通过，包含真实本机 HTTP/TCP 模拟服务的身份核验及转发、端口释放、已有 WDA 不启动测试、缺失 WDA 使用标准 Xcode、错误签名阻断及子进程清理。模拟设备窗口验证版本号、重命名、删除及 USB 排序。本轮未做手机连接或浏览实测，新启动流程仍需在出现故障的手机验证。
+
+## 1.2.24 无线端口与 USB 转发隔离
+
+修复备用无线通道复用 USB 的固定 WDA/MJPEG 端口（如 19001）造成 address already in use 的问题。无线 helper 直接绑定 loopback 的系统动态端口，由操作系统原子分配，不再先探测空闲端口后释放再绑定，也不修改 USB 的端口记录或按端口号关闭未知进程。
+
+helper 就绪事件返回真实控制、预览端口及本次启动标识；GUI 核验标识、有效端口、设备编号和签名后保存实际 URL。缓存复用也使用真实端口；旧协议进程仅在确认是本应用对应设备进程后重建，不复用旧端口记录。正常运行期间端口保持不变，重建后更新控制与预览地址。
+
+469 项自动检查通过，包含实际本机 HTTP/TCP 测试：旧端口保持占用时转发仍可启动，两条独立 helper 进程并行分配端口，控制读回和端口释放，以及 GUI 使用返回端口而不调用 USB 端口分配。模拟设备窗口和安装包另做自检。本轮未进行手机连接、刷视频或定位实测。

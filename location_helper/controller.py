@@ -6,8 +6,11 @@ from pathlib import Path
 def validate(cfg):
     if not re.fullmatch(r'(?:[a-fA-F0-9]{8}-[a-fA-F0-9]{16}|[a-fA-F0-9]{40})',cfg.get('udid','')):raise ValueError('Invalid device')
     if not re.fullmatch(r'com\.igconsole\.[A-Za-z0-9_.-]+\.xctrunner',cfg.get('bundle','')):raise ValueError('Invalid signed runner')
-    ports=[cfg.get(k) for k in ('local_wda','local_mjpeg','remote_wda','remote_mjpeg')]
-    if any(type(p) is not int or not 1024<p<65536 for p in ports) or ports[0]==ports[1] or ports[2]==ports[3]:raise ValueError('Invalid relay ports')
+    local=[cfg.get(k) for k in ('local_wda','local_mjpeg')]
+    remote=[cfg.get(k) for k in ('remote_wda','remote_mjpeg')]
+    if any(type(p) is not int or (p!=0 and not 1024<p<65536) for p in local):raise ValueError('Invalid relay ports')
+    if any(type(p) is not int or not 1024<p<65536 for p in remote):raise ValueError('Invalid relay ports')
+    if (local[0]!=0 and local[0]==local[1]) or remote[0]==remote[1]:raise ValueError('Invalid relay ports')
     return cfg
 
 async def response(rsd,port,route):
@@ -101,7 +104,7 @@ async def serve(cfg,emit):
         try:
             for local,remote in ((cfg['local_wda'],cfg['remote_wda']),(cfg['local_mjpeg'],cfg['remote_mjpeg'])):
                 servers.append(await asyncio.start_server(lambda r,w,p=remote:relay(r,w,p),'127.0.0.1',local))
-            emit('controller_ready',udid=cfg['udid'],fingerprint=info['uuid'],bundle=status['build']['productBundleIdentifier'],ios=status['os']['version'])
+            emit('controller_ready',udid=cfg['udid'],fingerprint=info['uuid'],bundle=status['build']['productBundleIdentifier'],ios=status['os']['version'],local_wda=servers[0].sockets[0].getsockname()[1],local_mjpeg=servers[1].sockets[0].getsockname()[1],attempt_id=cfg.get('attempt_id'))
             failures=0
             while True:
                 await asyncio.sleep(3)
