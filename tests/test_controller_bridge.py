@@ -139,6 +139,7 @@ class DynamicRelayPorts(unittest.TestCase):
     cfg=json.loads((base/'controller-request.json').read_text())
     self.assertEqual((cfg['local_wda'],cfg['local_mjpeg']),(0,0));self.assertEqual(cfg['relay_protocol'],2)
     proof.update(event='controller_ready',udid=UDID,bundle=BUNDLE,fingerprint='new',ios='26.6',local_wda=51001,local_mjpeg=51002,attempt_id=cfg['attempt_id'])
+    kwargs['stdout'].write(b'"Xcode diagnostic string"\n[]\n')
     kwargs['stdout'].write((json.dumps(proof)+'\n').encode());kwargs['stdout'].flush()
     return Mock(pid=12345,returncode=None)
    def checked(url,pin):self.assertEqual(url,'http://127.0.0.1:51001');return dict(bundle=BUNDLE,ios='26.6',fingerprint=pin,url=url)

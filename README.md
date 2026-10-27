@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.24**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.25**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.24 无线端口冲突修复测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.24/Instagram-Console-1.2.24-AppleSilicon.dmg)
+[下载 v1.2.25 搜索超时优化测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.25/Instagram-Console-1.2.25-AppleSilicon.dmg)
 
-[查看 v1.2.24 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.24)
+[查看 v1.2.25 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.25)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -342,3 +342,9 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 helper 就绪事件返回真实控制、预览端口及本次启动标识；GUI 核验标识、有效端口、设备编号和签名后保存实际 URL。缓存复用也使用真实端口；旧协议进程仅在确认是本应用对应设备进程后重建，不复用旧端口记录。正常运行期间端口保持不变，重建后更新控制与预览地址。
 
 469 项自动检查通过，包含实际本机 HTTP/TCP 测试：旧端口保持占用时转发仍可启动，两条独立 helper 进程并行分配端口，控制读回和端口释放，以及 GUI 使用返回端口而不调用 USB 端口分配。模拟设备窗口和安装包另做自检。本轮未进行手机连接、刷视频或定位实测。
+
+## 1.2.25 搜索阶段预算
+
+搜索输入、结果识别、打开视频、观看和返回列表分别计时，防止正常观看耗尽后续导航预算。默认两条搜索视频的整体上限由 130 秒调整为 370 秒；随视频数、观看设置和滚动次数变化，最多 900 秒。观看时长设置保持原值，整体上限不是强制等待时长。无响应阶段仍会超时，暂停本轮搜索并尝试恢复视频浏览，日志显示具体超时阶段；手动停止和任务总时长仍优先生效。
+
+另修复无线组件日志中出现 JSON 字符串或数组时的解析异常。新版无需因此重新签名手机组件。

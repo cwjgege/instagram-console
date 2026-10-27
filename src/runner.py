@@ -29,6 +29,21 @@ from watch_policy import playback_timing,playback_progress,playback_finished,obs
 from watch_relevance import watch_related as caption_watch_related
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
+SEARCH_STAGE_SECONDS={
+    'open_explore':30,'locate_input':45,'focus_input':45,'submit_query':45,
+    'verify_results':60,'select_result':45,'open_video':45,'return_results':45,
+    'scroll_results':45,'return_reels':60,
+}
+SEARCH_STAGE_LABELS={
+    'open_explore':'打开发现页','locate_input':'查找搜索框','focus_input':'确认搜索框',
+    'submit_query':'提交搜索词','verify_results':'等待搜索结果','select_result':'选择结果视频',
+    'open_video':'打开结果视频','watch_result':'观看结果视频','return_results':'返回结果列表',
+    'scroll_results':'滚动结果列表','return_reels':'返回视频流',
+}
+def search_budget_seconds(cfg):
+    count=int(cfg['search_videos_per_query']);scrolls=int(cfg['search_result_scrolls'])
+    return min(900,180+count*(60+cfg['search_watch_max'])+max(0,count-1)*scrolls*30)
+
 class ManualResume(BaseException):
     """Unwind all stale navigation/interaction frames after a human handoff."""
 AUTOMATION_DEFAULTS = dict(like_interval_min=3,like_interval_max=8,recovery_enabled=True,recovery_attempts=3,recovery_run_limit=5,
@@ -160,6 +175,7 @@ class Runner:
         self.in_interaction = False
         self.interaction_deadline = None
         self.search_deadline = None
+        self.search_overall_deadline = None
         self.video_watch = None
         self.refresh_required = False
         self.last_tree = None
@@ -191,7 +207,7 @@ class Runner:
         except Exception:return False
 
     def manual_handoff(self):
-        self.search_deadline=None
+        self.search_deadline=None;self.search_overall_deadline=None
         self._handling_pause=True
         started=time.monotonic()
         if self.current_post_key:self.handoff_skip_keys.add(self.current_post_key)
@@ -252,10 +268,13 @@ class Runner:
             raise Halt('已手动停止')
         if getattr(self,'pause_requested',None) is not None and self.pause_requested.is_set() and self.deadline and self.pause_enabled and not self.in_interaction and not self._handling_pause:
             self.manual_handoff()
-        if getattr(self,'search_deadline',None) is not None and time.monotonic()>=self.search_deadline:
-            raise SearchTimedOut('本次搜索超过时间上限，已暂停搜索并返回浏览')
         if self.deadline and not self._handling_pause and time.monotonic() >= self.deadline:
             raise Halt('本次时长已到')
+        if getattr(self,'search_overall_deadline',None) is not None and time.monotonic()>=self.search_overall_deadline:
+            raise SearchTimedOut('本次搜索达到整体时间上限，已暂停搜索并返回浏览')
+        if getattr(self,'search_deadline',None) is not None and time.monotonic()>=self.search_deadline:
+            stage=SEARCH_STAGE_LABELS.get(self.search_step,self.search_step or '未知阶段')
+            raise SearchTimedOut('搜索阶段超时（'+stage+'），已暂停搜索并返回浏览')
 
     def wait(self, seconds):
         end = time.monotonic() + seconds
@@ -268,18 +287,19 @@ class Runner:
         readonly=method=='GET' or suffix=='/elements' or (
             suffix=='/execute/sync' and (data or {}).get('script')=='mobile: activeAppInfo')
         def send():
-            deadlines=[d for d in (getattr(self,'interaction_deadline',None),getattr(self,'search_deadline',None),getattr(self,'watch_read_deadline',None) if readonly else None) if d is not None]
+            deadlines=[d for d in (getattr(self,'interaction_deadline',None),getattr(self,'search_deadline',None),getattr(self,'search_overall_deadline',None),getattr(self,'watch_read_deadline',None) if readonly else None) if d is not None]
             deadline=min(deadlines) if deadlines else None
             if deadline is None:return self.http(method,self.path+suffix,data)
             remaining=deadline-time.monotonic()
             if remaining<=0:
                 if getattr(self,'watch_read_deadline',None)==deadline:raise WatchBudgetExpired('本条观看预算已用完')
-                if getattr(self,'search_deadline',None)==deadline:raise SearchTimedOut('搜索已超时，暂停本轮搜索')
+                if deadline in (getattr(self,'search_deadline',None),getattr(self,'search_overall_deadline',None)):raise SearchTimedOut('搜索请求超过剩余阶段或整体预算，暂停本轮搜索')
                 raise InteractionSkipped('收藏确认已超时，跳过本条，不重复发送收藏操作')
             try:return self.http(method,self.path+suffix,data,timeout=min(35,remaining))
             except Exception as exc:
                 if getattr(self,'watch_read_deadline',None)==deadline and transport_error(exc) and time.monotonic()>=deadline:
                     raise WatchBudgetExpired('播放进度读取未在本条预算内完成') from exc
+                if transport_error(exc):self.check()
                 raise
         try:
             return send()
@@ -1083,18 +1103,28 @@ class Runner:
             return
         raise RuntimeError('搜索已暂停，返回短视频页的尝试已用完，请手动处理')
 
+    def search_stage(self,stage,watch_seconds=None):
+        self.check()
+        self.search_step=stage
+        budget=watch_seconds+10 if stage=='watch_result' else SEARCH_STAGE_SECONDS[stage]
+        self.search_deadline=time.monotonic()+budget
+        if self.search_overall_deadline is not None:self.search_deadline=min(self.search_deadline,self.search_overall_deadline)
+        self.log('search_stage',message='搜索：'+SEARCH_STAGE_LABELS[stage],stage=stage,budget_seconds=round(budget,1))
+
     def search_optional(self, term):
         if not self.feature_state['search']['enabled']:return False
         self.active_search_term=term
-        self.search_deadline=time.monotonic()+90+int(self.cfg['search_videos_per_query'])*self.cfg['search_watch_max']
+        self.search_deadline=None
+        budget=search_budget_seconds(self.cfg);self.search_overall_deadline=time.monotonic()+budget
+        self.log('search_budget',message='搜索使用独立阶段预算，正常观看不占用页面跳转预算',total_seconds=budget)
         try:
             self.search(term)
             return True
         except (Halt,PageBlocked):raise
         except Exception as exc:
-            self.search_deadline=None
+            self.search_deadline=None;self.search_overall_deadline=None
             self.search_failures+=1
-            self.feature_state['search']={'enabled':False,'reason':'本轮搜索异常，已暂停搜索'}
+            self.feature_state['search']={'enabled':False,'reason':str(exc) if isinstance(exc,SearchTimedOut) else '本轮搜索异常，已暂停搜索'}
             self.diagnose('search',exc)
             self.log('feature_disabled',message='本轮搜索已暂停，正在确认能否继续短视频浏览',feature='search',reason=diagnostics.redact(str(exc)))
             if isinstance(exc,TransportLost) or transport_error(exc):
@@ -1102,7 +1132,7 @@ class Runner:
             self.return_from_search()
             return False
         finally:
-            self.search_deadline=None
+            self.search_deadline=None;self.search_overall_deadline=None
             self.active_search_term=None
 
     def search_input(self):
@@ -1122,26 +1152,27 @@ class Runner:
             self.log('search_skip',message='搜索词不是英文，已跳过')
             return
         self.search_attempts+=1
-        self.search_step='open_explore'
+        self.search_stage('open_explore')
         self.click('explore-tab')
         self.wait(.7)
-        self.search_step='locate_input'
+        self.search_stage('locate_input')
         eid=self.search_input()
         self.command('POST','/element/'+eid+'/click',{})
         self.wait(.5)
-        self.search_step='focus_input'
+        self.search_stage('focus_input')
         eid=self.search_input()
-        self.search_step='submit_query'
+        self.search_stage('submit_query')
         self.command('POST','/element/'+eid+'/clear',{})
         self.command('POST','/element/'+eid+'/value',{'text':term+'\n'})
         self.wait(2)
-        self.search_step='verify_results'
+        self.search_stage('verify_results')
         tree=self.search_results(term)
         self.searches+=1
         self.log('search',message='已搜索：'+term,layout=search_layout(tree,term),attempt=self.search_attempts)
         seen=set()
         return_started=None
         for index in range(int(self.cfg['search_videos_per_query'])):
+            self.search_stage('select_result')
             tree=self.search_results(term)
             nodes=[e for e in tree.iter() if e.get('visible')=='true']
             candidates=[e for e in nodes if e.tag=='XCUIElementTypeCell'
@@ -1157,28 +1188,31 @@ class Runner:
             if len(found)!=1:
                 self.log('search_skip',message='搜索视频控件不唯一，跳过')
                 break
-            self.search_step='open_video'
+            self.search_stage('open_video')
             self.command('POST','/element/'+found[0][ELEMENT]+'/click',{})
             self.wait(1.5)
             post=self.read_reel()
             self.search_videos+=1;self.counts['watched']+=1
             self.log('search_watch',message='观看搜索结果视频',query=term,author=post['author'],search_videos=self.search_videos)
-            self.wait(self.rng.uniform(self.cfg['search_watch_min'],self.cfg['search_watch_max']))
+            watch_seconds=self.rng.uniform(self.cfg['search_watch_min'],self.cfg['search_watch_max'])
+            self.search_stage('watch_result',watch_seconds)
+            self.wait(watch_seconds)
+            self.search_stage('return_results')
             # Search browsing never sends social interactions. Return through the observed viewer control.
             return_started=time.monotonic()
             current=self.read_reel()
             if 'back-button' not in {e.get('name') for e in current['nodes']}:
                 raise NavigationLost('搜索视频缺少可识别的返回入口')
-            self.search_step='return_results'
             self.click('back-button');self.wait(1)
             tree=self.search_results(term)
             if index+1<int(self.cfg['search_videos_per_query']):
                 for _ in range(int(self.cfg['search_result_scrolls'])):
+                    self.search_stage('scroll_results')
                     self.search_results(term)
                     self.gesture('up');self.wait(1)
                     tree=self.search_results(term)
                     self.log('search_scroll',message='已滚动并重新确认搜索结果',query=term)
-        self.search_step='return_reels'
+        self.search_stage('return_reels')
         self.reels(initial_tree=tree)
         self.log('search_return_complete',message='搜索浏览结束，已恢复短视频浏览',
                  seconds=round(time.monotonic()-return_started,3) if return_started is not None else None)

@@ -89,7 +89,7 @@ def ensure(udid,setting,notify=lambda s:None,stop=None):
         for line in log.read_text(errors='replace').splitlines()[-30:]:
             try:proof=json.loads(line)
             except ValueError:continue
-            if proof.get('event')!='controller_ready':continue
+            if not isinstance(proof,dict) or proof.get('event')!='controller_ready':continue
             url,preview_url=relay_endpoints(proof,cfg)
             info=accept(udid,record,proof,url,setting,stop)
             dm.write_json(base/'controller-proof.json',proof)
