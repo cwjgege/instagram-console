@@ -153,11 +153,13 @@ class ConnectionWindow:
         except ValueError as e:self.status.set(str(e));return
         self.status.set('正在验证，完成前保留原连接配置…')
         def job():
-            setting={'mode':mode}
+            setting={'mode':mode};previous=cn.load(udid)
             if mode=='usb':cn.stop_device(udid)
             if mode!='usb':
                 url=values['wda_url'] if mode=='remote' else cn.ensure_wifi(udid,lambda s:self.events.put(('status',s)),stop=self.stop_event,setting_override={'mode':'wifi',**({'fingerprint':cn.load(udid)['fingerprint']} if cn.load(udid).get('fingerprint') else {})})
-                info=cn.checked(url,self.scan_pin) if self.scan_pin else cn.inspect(url)
+                pin=cn.load(udid).get('fingerprint') if mode=='wifi' else self.scan_pin
+                info=cn.checked(url,pin) if pin else cn.inspect(url)
+                if mode=='wifi' and self.scan_pin and self.scan_pin not in {previous.get('fingerprint'),info['fingerprint']}:raise RuntimeError('所选发现结果与已核验手机不一致，未保存。')
                 old=cn.load(udid)
                 if old.get('fingerprint') and old['fingerprint']!=info['fingerprint']:raise RuntimeError('设备指纹改变，未保存。请检查地址；如更换了签名组件，请先恢复 USB 配置后重新绑定。')
                 setting.update(identifier_kind=self.identity_kind,fingerprint=info['fingerprint'],wda_url=url if mode=='remote' else '',preview_url=values['preview_url'] if mode=='remote' else '',verified_ios=info['ios'])

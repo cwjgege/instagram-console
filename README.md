@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.15**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.16**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.15 首次配置优化测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.15/Instagram-Console-1.2.15-AppleSilicon.dmg)
+[下载 v1.2.16 自动核验指纹测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.16/Instagram-Console-1.2.16-AppleSilicon.dmg)
 
-[查看 v1.2.15 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.15)
+[查看 v1.2.16 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.16)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -258,3 +258,13 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 首次 USB 信任、开发者模式和签名安装仍需完成。向导默认勾选自动准备无线连接，在组件就绪后开启手机的已配对无线连接并读回确认，无需另开 Finder。旧设备可用“准备无线连接（无需重签名）”单独补做。拔掉 USB 后，向导自动验证 Network 定位开发通道和本机已签名 WDA；两项通过、设备身份正确、USB 仍未插回且未取消时才保存并切换本地 Wi-Fi。验证不修改坐标，无线失败保留原连接方式，组件安装结果独立保留。关闭等待窗口取消监测；验证过程中关闭会请求取消。手机需解锁并在同一可互通 Wi-Fi，iOS 16 本地无线控制仍需保留 USB。
 
 验证：354 项自动检查通过，覆盖无线准备失败与组件安装结果分离、关闭自动准备、取消、USB 未拔除或验证中重新插入、错误设备身份和组件不匹配时不保存连接。iPhone 11 / iOS 27.0.1 已完成自动开启配对与真实拔线后的 Network 定位服务、Wi-Fi WDA 两通道验证，并成功切换本地 Wi-Fi；验证没有修改手机坐标。
+
+## 1.2.16 核验同一手机后自动更新控件指纹
+
+本地 Wi-Fi 档案发生控件指纹变化时，使用系统已有 USB / Network 配对，通过明确 UDID 的 usbmux 端口直接读取手机控件身份，核对当前有效本机签名记录，再次读取候选 WDA 地址。UDID、指纹、组件标识均一致且未取消时，自动更新绑定，保留运行配置；不凭设备名称或 IP 放行，不重装组件。指纹不是永久硬件编号，开发安装或重装组件后可能变化。
+
+启动任务、保存连接和本地 Wi-Fi 定位读回均接入重新核验。错误缓存地址会跳过；没有本机配对、有效签名记录、真实 UDID，或遇到其他设备、指纹重复绑定、配置并发变化时保留原绑定并停止。仅有远程 WDA 地址的档案不自动更新指纹。最近一次成功核验记录保存在设备目录 fingerprint-refresh.json。签名到期、免费团队设备额度限制仍需单独处理。
+
+本轮使用自动化与本地模拟 usbmux 路由的 HTTP 传输测试验证；截图中的新 Mac 未接入当前执行环境，未声称已在该 Mac 完成重装后恢复的实机验收。
+
+验证：373 项自动检查通过，覆盖同机自动刷新、其他手机占用缓存 IP、其他组件、签名失效、错误安装记录、取消、重复绑定、并发配置变更和定位读回的自动恢复；配对端口探针还使用本地 HTTP 服务验证实际请求与错误 UDID 拦截。

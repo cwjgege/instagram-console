@@ -6,6 +6,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import build_opener,ProxyHandler,Request,HTTPRedirectHandler
 
+class FingerprintMismatch(RuntimeError):pass
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs):raise RuntimeError('网络 WDA 不允许 HTTP 重定向，请填写实际私网地址。')
 
@@ -34,11 +36,15 @@ def merged_target(udid):
     except (OSError,ValueError,TypeError):pass
     return None
 
-def save(udid,setting,merge_discovered_alias=False):
+def save(udid,setting,merge_discovered_alias=False,expected_fingerprint=None,expected_setting=None,stop=None):
     import device_manager as dm
     validate(setting);dm.DATA.mkdir(parents=True,exist_ok=True)
     with (dm.DATA/'connection-bindings.lock').open('a') as guard, ExitStack() as locks:
         fcntl.flock(guard,fcntl.LOCK_EX)
+        if expected_fingerprint is not None:
+            current=load(udid)
+            if current.get('mode')!='wifi' or current.get('fingerprint')!=expected_fingerprint:raise RuntimeError('连接绑定已被其他操作修改，未覆盖新配置。')
+        if expected_setting is not None and load(udid)!=expected_setting:raise RuntimeError('连接配置已被其他操作修改，未覆盖新配置。')
         pin=setting.get('fingerprint');aliases=[]
         if pin:
             for path in (dm.DATA/'devices').glob('*/connection.json'):
@@ -56,6 +62,9 @@ def save(udid,setting,merge_discovered_alias=False):
                     locks.enter_context(lock_device(path.parent.name))
                     aliases.append((path,other));continue
                 raise RuntimeError('这台 WDA 手机已经绑定到另一个设备档案，请使用原档案，避免重复任务。')
+        if stop is not None and stop.is_set():
+            from runner import Halt
+            raise Halt('已手动停止')
         target=dm.device_dir(udid)/'connection.json'
         before={p:p.read_bytes() if p.exists() else None for p in [target]+[p for p,_ in aliases]}
         try:
@@ -112,8 +121,48 @@ def inspect(url):
 
 def checked(url,pin):
     info=inspect(url)
-    if not pin or info['fingerprint']!=pin:raise RuntimeError('WDA 设备指纹与已绑定手机不一致，已停止；请检查地址并重新验证绑定。')
+    if not pin or info['fingerprint']!=pin:raise FingerprintMismatch('WDA 设备指纹与已绑定手机不一致，已停止；请检查地址并重新验证绑定。')
     return info
+
+def refresh_wifi_identity(udid,setting,url,info,port,stop=None,notify=lambda s:None):
+    import device_manager as dm
+    from runner import Halt
+    def check():
+        if stop is not None and stop.is_set():raise Halt('已手动停止')
+    check();old=setting.get('fingerprint')
+    if not old or old==info.get('fingerprint'):return
+    if setting.get('mode')!='wifi' or setting.get('identifier_kind','udid')!='udid':raise FingerprintMismatch('无法确认本机配对设备，未自动更新指纹。')
+    record=dm.signing_record(udid)
+    if not record or record.get('udid')!=udid or dm.expiry_state(record)[0] in ('unknown','expired'):raise FingerprintMismatch('缺少此手机的有效本机签名记录，未自动更新指纹。')
+    bundle=record.get('bundle_id','')
+    if not re.fullmatch(r'com\.igconsole\.[A-Za-z0-9_.-]+\.xctrunner',bundle):raise FingerprintMismatch('本机签名组件标识无效，未自动更新指纹。')
+    notify('控件指纹已变化，正在通过已配对设备编号核验同一台手机…')
+    try:proof=dm.controller_identity(udid,port)
+    except (OSError,RuntimeError,subprocess.SubprocessError) as exc:raise FingerprintMismatch('未能通过已配对手机核验指纹，原绑定保留：'+str(exc)[:200]) from exc
+    check()
+    allowed={bundle,bundle.removesuffix('.xctrunner')}
+    if proof.get('udid')!=udid or proof.get('fingerprint')!=info.get('fingerprint') or not info.get('fingerprint') or proof.get('bundle') not in allowed or info.get('bundle') not in allowed:
+        raise FingerprintMismatch('无线服务与已配对手机或本机签名控件不一致，未更新指纹。')
+    # Re-read the same endpoint after the trusted-device proof; address reuse or
+    # a service replacement during the probe must not authorize a different peer.
+    current=checked(url,proof['fingerprint']);check()
+    if current.get('bundle') not in allowed:raise FingerprintMismatch('核验期间控制组件发生变化，未更新指纹。')
+    saved=load(udid)
+    if saved.get('mode')!='wifi' or saved.get('fingerprint')!=old:raise FingerprintMismatch('连接配置已变化，未覆盖原绑定。')
+    updated={**saved,'fingerprint':proof['fingerprint'],'verified_ios':current['ios']}
+    check();save(udid,updated,expected_fingerprint=old,expected_setting=saved,stop=stop)
+    setting['fingerprint']=proof['fingerprint']
+    try:dm.write_json(dm.device_dir(udid)/'fingerprint-refresh.json',{'udid':udid,'previous_fingerprint':old,'fingerprint':proof['fingerprint'],'bundle':bundle,'verification':'paired-usbmux-wda','updated_at':time.time()})
+    except OSError:pass
+    notify('已通过配对设备编号与签名控件核验，自动更新指纹并保留原配置。')
+
+
+def inspect_wifi_identity(udid,setting,url,port,stop=None,notify=lambda s:None):
+    info=inspect(url)
+    if setting.get('fingerprint') and info.get('fingerprint')!=setting['fingerprint']:
+        refresh_wifi_identity(udid,setting,url,info,port,stop,notify)
+    return info
+
 
 def scan_network():
     import device_manager as dm
@@ -334,15 +383,14 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
         for cached in saved_wifi_endpoints(udid,setting['fingerprint']):
             try:
                 trace['candidates'].append(cached['url'])
-                info=checked(cached['url'],setting['fingerprint'])
+                info=inspect_wifi_identity(udid,setting,cached['url'],port,stop,notify)
                 dm.write_json(runtime/'network-runtime.json',{**info,'preview_url':cached.get('preview_url','')})
                 return info['url']
-            except (OSError,ValueError,KeyError) as exc:
+            except (OSError,ValueError,KeyError,FingerprintMismatch) as exc:
                 trace.setdefault('endpoint_errors',[]).append({'url':cached['url'],'error':type(exc).__name__+': '+str(exc)[:1000]})
     try:
         if not url:raise OSError('开发隧道尚未报告地址，交由 XCTest 建立开发连接。')
-        info=inspect(url)
-        if setting.get('fingerprint') and info['fingerprint']!=setting['fingerprint']:raise RuntimeError('无线设备指纹不一致，已停止。')
+        info=inspect_wifi_identity(udid,setting,url,port,stop,notify)
         dm.write_json(runtime/'network-runtime.json',{**info,'preview_url':url.rsplit(':',1)[0]+':'+str(mjpeg)});return url
     except (OSError,ValueError):pass
     # Standard XCTest orchestration is required on affected Xcode 27/DDI stacks.
@@ -388,8 +436,8 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
                 try:info=inspect(candidate);url=candidate;break
                 except OSError as exc:last_error=exc
             else:raise last_error or OSError('WDA 未返回可用地址')
-            if info.get('bundle')!=bundle:raise RuntimeError('返回服务的组件标识与当前手机签名记录不一致，已停止。')
-            if setting.get('fingerprint') and info['fingerprint']!=setting['fingerprint']:raise RuntimeError('无线设备指纹不一致，已停止。')
+            if info.get('bundle') not in {bundle,bundle.removesuffix('.xctrunner')}:raise RuntimeError('返回服务的组件标识与当前手机签名记录不一致，已停止。')
+            if setting.get('fingerprint') and info['fingerprint']!=setting['fingerprint']:refresh_wifi_identity(udid,setting,url,info,port,stop,notify)
             dm.write_json(runtime/'network-runtime.json',{**info,'preview_url':url.rsplit(':',1)[0]+':'+str(mjpeg)});return url
         except (OSError,ValueError):pass
         if process.poll() is not None:

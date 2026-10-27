@@ -66,7 +66,11 @@ class LocationReader:
         else:
             try:url=cfg['wda_url'] if cfg['mode']=='remote' else json.loads((dm.device_dir(udid)/'network-runtime.json').read_text())['url']
             except (OSError,ValueError,KeyError,TypeError):raise ReadbackError('无线控制接口未就绪，请先验证本机 Wi-Fi 连接。') from None
-            pin=cfg['fingerprint'];cn.checked(url,pin)
+            pin=cfg['fingerprint']
+            try:cn.checked(url,pin)
+            except cn.FingerprintMismatch:
+                if cfg['mode']!='wifi':raise
+                url=cn.ensure_wifi(udid);pin=cn.load(udid)['fingerprint'];cn.checked(url,pin)
             self.session(udid,required=False)
         with self.lock:self.bindings[udid]=(url,pin)
         return url,pin

@@ -306,6 +306,21 @@ def controller_apps(udid,bundles=None):
         raise RuntimeError('手机没有返回控制组件安装信息。')
 
 
+def controller_identity(udid,port=8100):
+    """Bind WDA identity to a trusted USB/Network usbmux device, never to a LAN IP."""
+    if not re.fullmatch(r'(?:[a-fA-F0-9]{8}-[a-fA-F0-9]{16}|[a-fA-F0-9]{40})',udid):raise ValueError('需要真实设备编号才能核验指纹。')
+    if type(port) is not int or not 1<=port<=65535:raise ValueError('控制组件端口无效。')
+    vendor=prepare_vendor();DATA.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=DATA,prefix='identity-probe-') as folder:
+        request=Path(folder)/'request.json';write_json(request,{'vendor':str(vendor),'mode':'identity','udid':udid,'port':port})
+        result=subprocess.run([str(vendor/'bin/node'),str(ASSETS/'resources/ios_device.cjs'),str(request)],env=child_env(vendor),capture_output=True,text=True,timeout=20)
+        try:value=json.loads(result.stdout.splitlines()[-1])
+        except (ValueError,IndexError):raise RuntimeError('未能通过已配对设备核验控件指纹，保留原绑定。') from None
+        if result.returncode or not isinstance(value,dict) or value.get('error'):raise RuntimeError('未能通过已配对设备核验控件指纹，保留原绑定。')
+        if str(value.get('udid','')).replace('-','').lower()!=udid.replace('-','').lower() or value.get('port')!=port:raise RuntimeError('指纹核验返回了其他设备或端口，保留原绑定。')
+        return value
+
+
 def setup_status(udid):
     if not udid:return None
     try:

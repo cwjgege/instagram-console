@@ -21,6 +21,29 @@ async function apps(){
   write(Object.entries(values).filter(([bundle])=>cfg.bundles?cfg.bundles.includes(bundle):/webdriver|igconsole|xctrunner/i.test(bundle)).map(([bundle,v])=>({bundle,name:v.CFBundleDisplayName||v.CFBundleName||bundle,version:v.CFBundleShortVersionString||'',path:v.Path||''})))
  }finally{service.close()}
 }
+// Read WDA through a port forwarded by usbmux for this exact paired UDID.
+// Never use a cached LAN address as proof that a changed identity is safe.
+async function wdaValue(route){
+ const socket=await ios.utilities.connectPort(cfg.udid,cfg.port);
+ const http=require('http');const agent=new http.Agent({keepAlive:false});agent.createConnection=()=>socket;
+ try{return await new Promise((resolve,reject)=>{
+  const request=http.get({host:'127.0.0.1',path:route,agent,headers:{Connection:'close'}},response=>{
+   let chunks=[],size=0;
+   response.on('data',chunk=>{size+=chunk.length;if(size>65536){request.destroy(Error('WDA identity response too large'));return}chunks.push(chunk)});
+   response.on('error',reject);response.on('aborted',()=>reject(Error('WDA identity response aborted')));
+   response.on('end',()=>{try{if(response.statusCode!==200)throw Error('WDA identity endpoint unavailable');const value=JSON.parse(Buffer.concat(chunks).toString('utf8'));resolve(value.value??value)}catch(e){reject(e)}});
+  });
+  request.setTimeout(5000,()=>request.destroy(Error('WDA identity request timed out')));request.on('error',reject);
+ })}finally{agent.destroy();socket.destroy()}
+}
+async function identity(){
+ if(!/^(?:[a-fA-F0-9]{8}-[a-fA-F0-9]{16}|[a-fA-F0-9]{40})$/.test(cfg.udid)||!Number.isInteger(cfg.port)||cfg.port<1||cfg.port>65535)throw Error('Invalid paired identity target');
+ let client=await ios.utilities.startLockdownSession(cfg.udid);let actual;
+ try{actual=await client.getValue({Key:'UniqueDeviceID'});if(String(actual).replaceAll('-','').toLowerCase()!==cfg.udid.replaceAll('-','').toLowerCase())throw Error('Paired device identity mismatch')}finally{client.close()}
+ const status=await wdaValue('/status');const info=await wdaValue('/wda/device/info');
+ if(status.ready!==true||!status.build?.productBundleIdentifier||!info.uuid||info.uuid==='unknown')throw Error('Paired device WDA identity unavailable');
+ write({udid:actual,fingerprint:info.uuid,bundle:status.build.productBundleIdentifier,ios:status.os?.version,port:cfg.port});
+}
 async function forward(local,remote){
  const server=net.createServer(async socket=>{let device;socket.on('error',()=>{if(device)device.destroy()});
   try{device=await ios.utilities.connectPort(cfg.udid,remote);device.on('error',()=>socket.destroy());socket.pipe(device);device.pipe(socket);socket.on('close',()=>device.destroy());}catch(e){socket.destroy()}
@@ -53,4 +76,4 @@ async function launch(){
 }
 function stop(code=0){if(launchLogTimer)clearTimeout(launchLogTimer);if(launchLog)launchLog.close();for(const s of servers)s.close();if(test)test.stop();process.exit(typeof code==='number'?code:0)}
 process.on('SIGTERM',stop);process.on('SIGINT',stop);
-(cfg.mode==='probe'?probe():cfg.mode==='apps'?apps():launch()).catch(e=>{write({error:String(e.message).slice(0,1000)});stop(1)});
+(cfg.mode==='probe'?probe():cfg.mode==='apps'?apps():cfg.mode==='identity'?identity():launch()).catch(e=>{write({error:String(e.message).slice(0,1000)});stop(1)});
