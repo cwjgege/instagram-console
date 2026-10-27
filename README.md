@@ -4,9 +4,9 @@
 
 ## 下载与安装
 
-[下载 v1.2.17 收藏弹层恢复测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.17/Instagram-Console-1.2.17-AppleSilicon.dmg)
+[下载 v1.2.18 无线恢复与异常通知测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.18/Instagram-Console-1.2.18-AppleSilicon.dmg)
 
-[查看 v1.2.17 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.17)
+[查看 v1.2.18 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.18)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -276,10 +276,12 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 登录、账号验证、系统弹窗和输入框仍保留人工处理，未识别到唯一关闭入口时明确提示，不盲点。388 项自动检查通过，包括持久弹层端到端恢复、立即翻页、不重复写入、剩余时长限制、隐藏容器可见内容和未知/安全页面拦截。弹层结构由测试模拟，本轮未在真实 Instagram 账号执行收藏，需在用户设备复测当前界面。
 
 
-## 1.2.18 本地验证版
+## 1.2.18 无线恢复与异常通知测试版
 
 异常停止、可选功能暂停及继续托管失败时发送本机通知，同一次运行去重并保留最近 30 条 task-alerts.json；正常结束和手动停止不提醒。macOS 通知权限或勿扰设置可能抑制横幅，应用内状态与记录仍保留。
 
 搜索加入总时限，失败后暂停本轮搜索并安全返回 Reels。升级版本或换 Mac 后不复用缓存会话标识，重新建立控制会话，保留浏览配置和互动记录。新 Mac 的电脑信任、开发环境及签名仍须本机完成。
 
 修正已配对 usbmux 连接暂停读取导致的指纹核验超时。Xcode 无线测试通道明确拒绝 XCTestDriverInterface 时，使用独立的 pymobiledevice3 用户态通道启动原有签名组件，并转发至本机环回端口。逐台核验实际 UDID、签名组件与当前 WDA 指纹；不使用其他手机或共享系统隧道。实机验证结果另见发布说明。
+
+发布前在 iPhone 11 / iOS 26.6 拔线保留 VPN 环境下连续运行 532.4 秒：16 轮浏览、2 轮完整搜索、2 次收藏流程，无异常退出或重连；捕获的收藏弹层自动关闭后继续浏览。400 项自动检查通过。
