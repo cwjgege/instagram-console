@@ -626,6 +626,13 @@ class Panel:
                 if row['event']=='worker_result':
                     self.worker_result=row['status'];continue
                 msg=row.get('message',row['event'])
+                if row['event'] in ('error','feature_disabled','resume_blocked'):
+                    from notifications import TaskAlerts
+                    if not hasattr(self,'task_alerts'):
+                        self.task_alerts=TaskAlerts(self.cfg['runtime_dir'],self.cfg.get('device_name','iPhone'))
+                    if self.task_alerts.handle(self.generation,row):
+                        try:self.root.bell()
+                        except tk.TclError:pass
                 self.append(row.get('time','')[-8:]+'  '+msg)
                 if row['event']=='ai_preview':
                     self.ai_result.configure(state='normal');self.ai_result.insert('end','\n\n仅预览，未发送。');self.ai_result.configure(state='disabled')

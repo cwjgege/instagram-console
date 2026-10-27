@@ -334,6 +334,13 @@ def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
         stop_device(udid);raise
     except Exception as exc:
         stop_device(udid)
+        if trace.get('controller_channel_refused'):
+            import controller_bridge
+            try:return controller_bridge.ensure(udid,setting_override or load(udid),notify,stop)
+            except Halt:
+                stop_device(udid);raise
+            except Exception as fallback:
+                stop_device(udid);exc=RuntimeError(str(exc)+'；备用无线通道：'+str(fallback))
         # A diagnostic write failure must not replace the original connection error.
         try:path=record_connection_failure(udid,trace,exc)
         except Exception:raise exc
@@ -362,6 +369,9 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
     try:major=int(p.get('osVersionNumber','').split('.')[0])
     except ValueError:raise RuntimeError('未能读取手机系统版本，请重新检测。') from None
     if major<17:raise RuntimeError('iOS 16 本地无线自动启动尚未适配，请使用 USB 或远程已有 WDA 模式。')
+    if c.get('transportType')=='localNetwork' and major>=17:
+        import controller_bridge
+        if controller_bridge.preferred(udid):return controller_bridge.ensure(udid,setting,notify,stop)
     derived=derived_path(udid);runs=sorted((derived/'Build/Products').glob('*.xctestrun'),key=lambda f:f.stat().st_mtime,reverse=True)
     env={}
     def read_env(value):
@@ -441,6 +451,8 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
             dm.write_json(runtime/'network-runtime.json',{**info,'preview_url':url.rsplit(':',1)[0]+':'+str(mjpeg)});return url
         except (OSError,ValueError):pass
         if process.poll() is not None:
+            if 'Connection peer refused channel request' in recent and 'XCTestDriverInterface' in recent:
+                trace['controller_channel_refused']=True
             if re.search(r'for reason: Locked|BSErrorCodeDescription\s*=\s*Locked',recent):
                 trace['stage']='device_locked'
                 raise RuntimeError('iOS 拒绝启动组件：手机处于锁定状态。请在手机输入锁屏密码、保持亮屏后重新验证；不需要重装或创建证书。')

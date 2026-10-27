@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Separate location-only process. NDJSON stdin/stdout; no Appium or WDA access."""
+"""Separate device-service process. NDJSON location control and paired wireless relay."""
 import asyncio,json,math,os,re,sys
 from contextlib import AsyncExitStack
 from importlib.metadata import version
@@ -114,6 +114,10 @@ async def main():
         from pymobiledevice3.services.simulate_location import DtSimulateLocation
         assert version('pymobiledevice3')==PIN
         emit('self_test',version=PIN);return
+    if len(sys.argv)==3 and sys.argv[1]=='--run-controller':
+        from controller import serve as controller_serve
+        from pathlib import Path
+        await controller_serve(json.loads(Path(sys.argv[2]).read_text()),emit);return
     if len(sys.argv)==3 and sys.argv[1] in ('--prepare-wireless','--check-wireless'):
         try:await asyncio.wait_for(wireless_command(sys.argv[1],sys.argv[2]),40)
         except Exception as exc:emit('error',error=type(exc).__name__+': '+str(exc)[:600]);raise SystemExit(1)

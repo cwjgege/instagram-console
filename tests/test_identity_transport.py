@@ -16,7 +16,7 @@ class PairedTransport(unittest.TestCase):
   try:
    with tempfile.TemporaryDirectory() as folder:
     vendor=Path(folder);driver=vendor/'node_modules/appium-xcuitest-driver';module=driver/'node_modules/appium-ios-device';module.mkdir(parents=True);(driver/'package.json').write_text('{}')
-    code="const net=require('net');exports.utilities={startLockdownSession:async()=>({getValue:async()=>ACTUAL,close(){}}),connectPort:async(id,port)=>{if(id!==TARGET||port!==8100)throw Error('Wrong route');return new Promise((resolve,reject)=>{const socket=net.createConnection({host:'127.0.0.1',port:PORT},()=>resolve(socket));socket.once('error',reject)})}};"
+    code="const net=require('net');exports.utilities={startLockdownSession:async()=>({getValue:async()=>ACTUAL,close(){}}),connectPort:async(id,port)=>{if(id!==TARGET||port!==8100)throw Error('Wrong route');return new Promise((resolve,reject)=>{const socket=net.createConnection({host:'127.0.0.1',port:PORT},()=>{socket.pause();resolve(socket)});socket.once('error',reject)})}};"
     code=code.replace('ACTUAL',json.dumps(actual)).replace('TARGET',json.dumps(UDID)).replace('PORT',str(server.server_address[1]));(module/'index.js').write_text(code)
     request=vendor/'request.json';request.write_text(json.dumps({'vendor':str(vendor),'mode':'identity','udid':UDID,'port':8100}))
     result=subprocess.run([NODE,'src/resources/ios_device.cjs',str(request)],capture_output=True,text=True,timeout=10)

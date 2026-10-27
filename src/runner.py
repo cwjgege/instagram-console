@@ -24,6 +24,7 @@ import ai_comments
 import diagnostics
 from page_state import (PageBlocked, classify, visible_nodes, screen_height, search_input_node, search_layout, search_back_name, profile_back_name, collection_sheet_nodes, collection_sheet_close)
 from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
+from session_context import current as session_context
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
 class ManualResume(BaseException):
@@ -74,6 +75,9 @@ class Halt(Exception):
 
 class NavigationLost(RuntimeError):
     """Recoverable navigation loss; never used for an unconfirmed write result."""
+    pass
+
+class SearchTimedOut(NavigationLost):
     pass
 
 def atomic_json(path, value):
@@ -150,6 +154,7 @@ class Runner:
         self.reconnect_times = []
         self.in_interaction = False
         self.interaction_deadline = None
+        self.search_deadline = None
         self.refresh_required = False
         self.last_tree = None
         self.page_state = None
@@ -180,6 +185,7 @@ class Runner:
         except Exception:return False
 
     def manual_handoff(self):
+        self.search_deadline=None
         self._handling_pause=True
         started=time.monotonic()
         if self.current_post_key:self.handoff_skip_keys.add(self.current_post_key)
@@ -240,6 +246,8 @@ class Runner:
             raise Halt('已手动停止')
         if getattr(self,'pause_requested',None) is not None and self.pause_requested.is_set() and self.deadline and self.pause_enabled and not self.in_interaction and not self._handling_pause:
             self.manual_handoff()
+        if getattr(self,'search_deadline',None) is not None and time.monotonic()>=self.search_deadline:
+            raise SearchTimedOut('本次搜索超过时间上限，已暂停搜索并返回浏览')
         if self.deadline and not self._handling_pause and time.monotonic() >= self.deadline:
             raise Halt('本次时长已到')
 
@@ -254,10 +262,13 @@ class Runner:
         readonly=method=='GET' or suffix=='/elements' or (
             suffix=='/execute/sync' and (data or {}).get('script')=='mobile: activeAppInfo')
         def send():
-            deadline=getattr(self,'interaction_deadline',None)
+            deadlines=[d for d in (getattr(self,'interaction_deadline',None),getattr(self,'search_deadline',None)) if d is not None]
+            deadline=min(deadlines) if deadlines else None
             if deadline is None:return self.http(method,self.path+suffix,data)
             remaining=deadline-time.monotonic()
-            if remaining<=0:raise InteractionSkipped('收藏确认已超时，跳过本条，不重复发送收藏操作')
+            if remaining<=0:
+                if getattr(self,'search_deadline',None)==deadline:raise SearchTimedOut('搜索已超时，暂停本轮搜索')
+                raise InteractionSkipped('收藏确认已超时，跳过本条，不重复发送收藏操作')
             return self.http(method,self.path+suffix,data,timeout=min(35,remaining))
         try:
             return send()
@@ -401,6 +412,18 @@ class Runner:
             else:
                 raise RuntimeError('Appium 服务未能启动')
         state = self.runtime / 'active-session.json'
+        if state.exists():
+            try:cached_context=json.loads(state.read_text())
+            except (OSError,ValueError):cached_context={}
+            if not isinstance(cached_context,dict):cached_context={}
+            if cached_context.get('_igconsole_context')!=session_context():
+                caps=cached_context.get('capabilities',{})
+                if caps.get('udid',caps.get('appium:udid')) not in (None,self.cfg['device_udid']):
+                    raise RuntimeError('缓存设备标识不一致，未覆盖其他设备会话。')
+                # Session IDs and local URLs copied from another Mac are not proof
+                # of ownership. Forget only the cache; never DELETE that session ID.
+                state.unlink(missing_ok=True);force_new=True
+                self.log('session_context_reset',message='检测到版本或电脑变化，保留配置并重新建立控制会话；不重装组件。')
         if state.exists() and not force_new:
             try:old=json.loads(state.read_text())
             except (OSError,ValueError):old={};state.unlink(missing_ok=True)
@@ -474,6 +497,7 @@ class Runner:
             if connection['mode']!='remote':
                 atomic_json(self.runtime/'setup-state.json',{'status':'ready','message':'控制组件已连接验证。'})
                 (self.runtime/'pending-setup.json').unlink(missing_ok=True)
+        value['_igconsole_context']=session_context()
         atomic_json(state,value)
         self.path = '/session/' + value['sessionId']
         self.check()
@@ -983,11 +1007,13 @@ class Runner:
     def search_optional(self, term):
         if not self.feature_state['search']['enabled']:return False
         self.active_search_term=term
+        self.search_deadline=time.monotonic()+90+int(self.cfg['search_videos_per_query'])*self.cfg['search_watch_max']
         try:
             self.search(term)
             return True
         except (Halt,PageBlocked):raise
         except Exception as exc:
+            self.search_deadline=None
             self.search_failures+=1
             self.feature_state['search']={'enabled':False,'reason':'本轮搜索异常，已暂停搜索'}
             self.diagnose('search',exc)
@@ -997,6 +1023,7 @@ class Runner:
             self.return_from_search()
             return False
         finally:
+            self.search_deadline=None
             self.active_search_term=None
 
     def search_input(self):

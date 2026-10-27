@@ -52,3 +52,21 @@ class SearchBrowsing(unittest.TestCase):
   for change in [dict(search_videos_per_query=99),dict(search_result_scrolls=0),dict(search_watch_min=30,search_watch_max=10)]:
    with self.assertRaises(ValueError):validate_motion({**self.r.cfg,**change})
 if __name__=='__main__':unittest.main()
+
+class SearchBudget(unittest.TestCase):
+ def test_expired_search_budget_cleared_before_return_navigation(self):
+  import time
+  with tempfile.TemporaryDirectory() as directory:
+   r=Runner({**CFG,'runtime_dir':directory},notify=lambda _:None);r.diagnose=Mock()
+   def stuck(term):
+    r.search_deadline=time.monotonic()-1;r.check()
+   r.search=stuck
+   r.return_from_search=Mock(side_effect=lambda:self.assertIsNone(r.search_deadline))
+   self.assertFalse(r.search_optional('AI video creation'));self.assertIsNone(r.search_deadline)
+   self.assertFalse(r.feature_state['search']['enabled']);r.return_from_search.assert_called_once()
+ def test_search_request_timeout_uses_remaining_budget(self):
+  import time
+  with tempfile.TemporaryDirectory() as directory:
+   r=Runner({**CFG,'runtime_dir':directory});r.path='/session/test';r.http=Mock(return_value={});r.search_deadline=time.monotonic()+2
+   r.command('GET','/source')
+   self.assertGreater(r.http.call_args.kwargs['timeout'],0);self.assertLessEqual(r.http.call_args.kwargs['timeout'],2)

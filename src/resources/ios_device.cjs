@@ -33,6 +33,7 @@ async function wdaValue(route){
    response.on('error',reject);response.on('aborted',()=>reject(Error('WDA identity response aborted')));
    response.on('end',()=>{try{if(response.statusCode!==200)throw Error('WDA identity endpoint unavailable');const value=JSON.parse(Buffer.concat(chunks).toString('utf8'));resolve(value.value??value)}catch(e){reject(e)}});
   });
+  socket.resume();
   request.setTimeout(5000,()=>request.destroy(Error('WDA identity request timed out')));request.on('error',reject);
  })}finally{agent.destroy();socket.destroy()}
 }

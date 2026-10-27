@@ -6,8 +6,12 @@ communicates with the GUI over JSON lines on stdin/stdout. Its JSON protocol acc
 `--prepare-wireless UDID` to enable and read back trusted Wi-Fi pairing over USB,
 and `--check-wireless UDID` to check the Network developer-location channel
 without setting or clearing a position. Both verify the selected physical UDID.
-No trajectories or social
-network actions are implemented. This license does not grant rights to unrelated
+`--run-controller REQUEST.json` starts only the selected, already signed XCTest
+runner and relays its WDA/MJPEG ports to loopback through an isolated paired
+userspace tunnel. The request specifies the physical UDID, signed runner bundle,
+and four validated ports. The helper verifies UDID and WDA bundle before emitting
+`controller_ready`. It does not choose social actions or change locations in this
+mode. No trajectories are implemented. This license does not grant rights to unrelated
 third-party components; their notices are supplied in `licenses/location`.
 
 Rebuild on Apple Silicon macOS using Python 3.14:

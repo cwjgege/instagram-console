@@ -13,6 +13,7 @@ class RestartLifecycle(unittest.TestCase):
   p.worker=Mock();p.worker.is_alive.return_value=True
   p.generation=2;p.run_ui_active=True;p.worker_result=None;p.finished_row=None;p.phase_text='';p.phase_started=0
   p.events=queue.Queue();p.stop_event=threading.Event();p.pending_start=None;p.closing=False;p.stop_requested_at=None
+  p.task_alerts=Mock();p.task_alerts.handle.return_value=False
   p.last_start={'test':True,'preview':False,'diagnostic':False};p.run_error='unexpected'
   return p
  def test_pointer_trace_never_reads_text_input(self):
@@ -57,7 +58,7 @@ class SessionLifecycle(unittest.TestCase):
   self.env=patch.dict(os.environ,IG_CONSOLE_LOCK_DIR=str(self.base/'locks'));self.env.start()
   self.r=Runner({**CFG,'device_udid':'A'*20,'runtime_dir':str(self.base)},notify=lambda _:None,seconds=0)
   self.r.wait_for_usb=Mock();self.r.wait=Mock()
-  (self.base/'active-session.json').write_text(json.dumps(dict(sessionId='old',capabilities={'udid':'A'*20})))
+  (self.base/'active-session.json').write_text(json.dumps(dict(sessionId='old',capabilities={'udid':'A'*20},_igconsole_context=__import__('session_context').current())))
   (self.base/'session-request.json').write_text(json.dumps({'capabilities':{'alwaysMatch':{'appium:udid':'A'*20}}}))
  def tearDown(self):self.env.stop();self.tmp.cleanup()
  def test_cached_connection_requires_real_device_response(self):
@@ -71,6 +72,15 @@ class SessionLifecycle(unittest.TestCase):
    self.assertEqual(call.call_args_list[2].args,('DELETE','/session/old'))
    self.assertFalse(call.call_args_list[3].args[2]['capabilities']['alwaysMatch']['appium:useNewWDA'])
    self.assertEqual(self.r.path,'/session/new')
+ def test_other_mac_or_version_cache_never_deletes_copied_session(self):
+  for context in (None,{'host':'another-mac','version':'old'}):
+   self.r.path=None
+   (self.base/'active-session.json').write_text(json.dumps(dict(sessionId='copied',capabilities={'udid':'A'*20},_igconsole_context=context)))
+   with patch('runner.call',side_effect=[{},dict(sessionId='fresh',capabilities={'udid':'A'*20})]) as call:
+    self.r.connect()
+    self.assertEqual([c.args[0] for c in call.call_args_list],['GET','POST'])
+    self.assertEqual(self.r.path,'/session/fresh')
+    self.assertEqual(json.loads((self.base/'active-session.json').read_text())['_igconsole_context'],__import__('session_context').current())
  def test_old_saved_uninstall_flag_is_ignored_for_new_connection(self):
   (self.base/'active-session.json').unlink()
   (self.base/'session-request.json').write_text(json.dumps({'capabilities':{'alwaysMatch':{'appium:udid':'A'*20,'appium:useNewWDA':True}}}))
