@@ -130,8 +130,8 @@ class Degradation(unittest.TestCase):
    with self.assertRaises(type(exc)):self.r.search_optional('AI video creation')
    self.r.return_from_search.assert_not_called()
  def test_transport_error_disables_search_and_reaches_reconnect(self):
-  self.r.search=Mock(side_effect=TransportLost('lost'));self.r.return_from_search=Mock()
-  with self.assertRaises(TransportLost):self.r.search_optional('AI video creation')
+  self.r.search=Mock(side_effect=TransportLost('lost'));self.r.return_from_search=Mock();self.r.recover_connection=Mock()
+  self.assertFalse(self.r.search_optional('AI video creation'));self.r.recover_connection.assert_called_once()
   self.assertFalse(self.r.feature_state['search']['enabled']);self.r.return_from_search.assert_not_called()
  def test_unknown_input_is_not_dismissed(self):
   self.r.snapshot=Mock(return_value=search('a private draft'))

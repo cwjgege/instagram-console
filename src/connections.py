@@ -6,6 +6,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import build_opener,ProxyHandler,Request,HTTPRedirectHandler
 
+class WirelessStartupUnavailable(ConnectionError):pass
+class QuickConnectionUnavailable(ConnectionError):pass
+
 class FingerprintMismatch(RuntimeError):pass
 class IdentityProofUnavailable(FingerprintMismatch):pass
 
@@ -109,19 +112,19 @@ def get(url,path,timeout=4,max_bytes=2*1024*1024):
     if not isinstance(result,dict):raise RuntimeError('地址没有返回 WDA JSON 对象。')
     return result.get('value',result)
 
-def inspect(url):
-    status=get(url,'/status')
+def inspect(url,timeout=4):
+    status=get(url,'/status',timeout=timeout)
     if not isinstance(status,dict) or status.get('ready') is not True or not status.get('build',{}).get('productBundleIdentifier'):raise RuntimeError('地址可访问，但不是已就绪的 WDA。')
     version=status.get('os',{}).get('version','')
     if not isinstance(version,str) or not re.fullmatch(r'\d+(?:\.\d+){0,2}',version):raise RuntimeError('WDA 未返回可识别的 iOS 版本。')
-    info=get(url,'/wda/device/info')
+    info=get(url,'/wda/device/info',timeout=timeout)
     if not isinstance(info,dict):raise RuntimeError('WDA 未返回设备信息。')
     identity=info.get('uuid','')
     if not identity or identity=='unknown':raise RuntimeError('组件未返回设备指纹，无法安全绑定，请更新 WDA 后重试。')
     return {'fingerprint':identity,'name':info.get('name','iPhone'),'ios':status.get('os',{}).get('version',''),'bundle':status['build']['productBundleIdentifier'],'url':url}
 
-def checked(url,pin):
-    info=inspect(url)
+def checked(url,pin,timeout=4):
+    info=inspect(url) if timeout==4 else inspect(url,timeout=timeout)
     if not pin or info['fingerprint']!=pin:raise FingerprintMismatch('WDA 设备指纹与已绑定手机不一致，已停止；请检查地址并重新验证绑定。')
     return info
 
@@ -251,6 +254,32 @@ def saved_wifi_endpoints(udid,pin):
     # Prefer a previously bound IPv4 endpoint, but recheck its fingerprint first.
     return sorted(valid,key=lambda value:':' in (urlsplit(value['url']).hostname or ''))
 
+def quick_wifi(udid,notify=lambda s:None,stop=None):
+    """Rebind only a previously proved endpoint. No discovery, launch, or signing."""
+    import device_manager as dm
+    from runner import Halt
+    setting=load(udid);pin=setting.get('fingerprint')
+    if setting['mode'] not in ('wifi','remote'):raise ValueError('快速无线重连的连接方式无效')
+    if not pin:raise QuickConnectionUnavailable('没有已核验的无线指纹，等待完整连接核验')
+    record=dm.signing_record(udid) if setting['mode']=='wifi' else None
+    if setting['mode']=='wifi' and (not record or record.get('udid')!=udid or dm.expiry_state(record)[0] in ('unknown','expired')):
+        raise RuntimeError('手机缺少有效的本机签名，请先完成连接配置')
+    candidates=([{'url':setting['wda_url'],'preview_url':setting.get('preview_url','')}] if setting['mode']=='remote' else saved_wifi_endpoints(udid,pin)[:2])
+    for candidate in candidates:
+        if stop is not None and stop.is_set():raise Halt('已手动停止')
+        try:
+            info=checked(candidate['url'],pin,timeout=2)
+            if record and info.get('bundle') not in (record['bundle_id'],record['bundle_id'].removesuffix('.xctrunner')):
+                raise FingerprintMismatch('已缓存的无线地址签名不匹配，未接管该设备')
+            if stop is not None and stop.is_set():raise Halt('已手动停止')
+            dm.write_json(dm.device_dir(udid)/'network-runtime.json',{**info,'preview_url':candidate.get('preview_url','')})
+            notify('已重新核验原手机的现有无线通道，未启动或重签组件。')
+            return candidate['url']
+        except FingerprintMismatch:raise
+        except (OSError,RuntimeError):continue
+    raise QuickConnectionUnavailable('原无线通道暂不可用，等待延后重连建立通道')
+
+
 def stop_device(udid):
     with _LOCK:process=_PROCESSES.pop(udid,None)
     if process and process.poll() is None:
@@ -365,11 +394,14 @@ def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
                 stop_device(udid);raise
             except Exception as fallback:
                 trace['fallback_error']=str(fallback)[:2000]
-                stop_device(udid);exc=RuntimeError(str(exc)+'；备用无线通道：'+str(fallback))
+                stop_device(udid);error_type=WirelessStartupUnavailable if isinstance(fallback,controller_bridge.ControllerStartupError) else RuntimeError
+                exc=error_type(str(exc)+'；备用无线通道：'+str(fallback))
         # A diagnostic write failure must not replace the original connection error.
         try:path=record_connection_failure(udid,trace,exc)
         except Exception:raise exc
-        raise RuntimeError(str(exc)+'\n连接诊断：'+str(path)) from exc
+        import controller_bridge
+        error_type=WirelessStartupUnavailable if isinstance(exc,(WirelessStartupUnavailable,controller_bridge.ControllerStartupError)) else RuntimeError
+        raise error_type(str(exc)+'\n连接诊断：'+str(path)) from exc
 
 def _ensure_wifi(udid,notify,stop,setting_override,trace):
     import device_manager as dm

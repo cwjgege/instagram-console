@@ -30,6 +30,8 @@ def relay_endpoints(proof,request):
         raise RuntimeError('无线通道未返回有效的独立端口。')
     return f'http://127.0.0.1:{wda}',f'http://127.0.0.1:{mjpeg}'
 
+class ControllerStartupError(RuntimeError):pass
+
 def startup_failure(log,returncode):
     import re
     try:
@@ -42,10 +44,11 @@ def startup_failure(log,returncode):
         except ValueError:value={}
         if isinstance(value,dict) and value.get('event')=='error' and value.get('error'):
             detail=str(value['error'])[:1200];break
-        if re.match(r'^[\w.]+(?:Error|Exception):',line):detail=line[:1200];break
+        if re.match(r'^(?:[\w.]+(?:Error|Exception)|(?:[\w.]+\.)?IdentityMismatch):',line):detail=line[:1200];break
     detail=detail or '未收到可用的控件核验结果，请查看 controller-wireless.log。'
+    if 'IdentityMismatch:' in detail:return cn.FingerprintMismatch('独立无线通道身份核验失败，未继续重连：'+detail)
     if 'ConnectionTerminatedError' in detail:detail+='；XCTest 测试进程在完成启动前断开，请保留本次启动日志；这不代表开发者模式未开启。'
-    return RuntimeError('独立无线通道启动失败（退出码 '+str(returncode)+'）：'+detail)
+    return ControllerStartupError('独立无线通道启动失败（退出码 '+str(returncode)+'）：'+detail)
 
 def ensure(udid,setting,notify=lambda s:None,stop=None):
     record=dm.signing_record(udid)
@@ -64,13 +67,13 @@ def ensure(udid,setting,notify=lambda s:None,stop=None):
         if process is not None and process.poll() is None:
             try:
                 request_cfg=json.loads((base/'controller-request.json').read_text())
-                if request_cfg.get('launch_mode')!='standard' or request_cfg.get('relay_protocol')!=2:raise RuntimeError('旧版无线进程需要按新版方式重新建立。')
+                if request_cfg.get('launch_mode')!='standard' or request_cfg.get('relay_protocol')!=2 or request_cfg.get('health_protocol')!=1:raise RuntimeError('旧版无线进程需要按新版方式重新建立。')
                 proof=json.loads((base/'controller-proof.json').read_text());url,preview_url=relay_endpoints(proof,request_cfg);info=accept(udid,record,proof,url,setting,stop)
                 dm.write_json(base/'network-runtime.json',{**info,'preview_url':preview_url})
                 return url
             except (OSError,ValueError,RuntimeError):cn.stop_device(udid)
         request=base/'controller-request.json'
-        cfg={'udid':udid,'bundle':record['bundle_id'],'local_wda':0,'local_mjpeg':0,'relay_protocol':2,'attempt_id':uuid.uuid4().hex,'remote_wda':8100,'remote_mjpeg':9100,'launch_mode':'standard'}
+        cfg={'udid':udid,'bundle':record['bundle_id'],'local_wda':0,'local_mjpeg':0,'relay_protocol':2,'health_protocol':1,'attempt_id':uuid.uuid4().hex,'remote_wda':8100,'remote_mjpeg':9100,'launch_mode':'standard'}
         try:
             derived=cn.derived_path(udid);cfg['remote_wda'],cfg['remote_mjpeg']=cn.wireless_ports(derived)
             cfg['xctestrun']=str(cn.prepare_wireless_xctestrun(derived,base,record['bundle_id'],cfg['remote_wda'],cfg['remote_mjpeg']))
@@ -98,4 +101,4 @@ def ensure(udid,setting,notify=lambda s:None,stop=None):
             notify('已通过配对设备编号和签名核验无线通道。');return url
         if process.poll() is not None:raise startup_failure(log,process.returncode)
         time.sleep(.25)
-    cn.stop_device(udid);raise RuntimeError('独立无线控件启动验证超时，请查看 controller-wireless.log 中的启动记录。')
+    cn.stop_device(udid);raise ControllerStartupError('独立无线控件启动验证超时，请查看 controller-wireless.log 中的启动记录。')

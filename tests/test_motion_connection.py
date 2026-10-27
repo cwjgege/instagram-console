@@ -86,7 +86,7 @@ class MotionConnection(unittest.TestCase):
  def test_reconnect_respects_draft_guard(self):
   self.r.connect=Mock();self.r.recover_reels=Mock(side_effect=RuntimeError('输入框'))
   with self.assertRaisesRegex(RuntimeError,'输入框'):self.r.recover_connection()
-  self.r.connect.assert_called_once_with(force_new=True)
+  self.r.connect.assert_called_once_with(force_new=True,quick=True)
  def test_interaction_never_reconnects(self):
   self.r.in_interaction=True;self.r.connect=Mock()
   with self.assertRaisesRegex(RuntimeError,'不会重发'):self.r.recover_connection()
@@ -94,7 +94,7 @@ class MotionConnection(unittest.TestCase):
  def test_reconnect_budget_and_stop(self):
   self.r.connect=Mock(side_effect=TransportLost('gone'))
   with self.assertRaisesRegex(RuntimeError,'次数已用完'):self.r.recover_connection()
-  self.assertEqual(self.r.connect.call_count,self.r.cfg['reconnect_limit'])
+  self.assertEqual(self.r.connect.call_count,3+self.r.cfg['reconnect_limit'])
   self.r.stop.set()
   with self.assertRaises(Halt):self.r.recover_connection()
  def test_reconnected_page_is_verified(self):
@@ -113,7 +113,7 @@ class RecoveryWindow(unittest.TestCase):
   with patch('runner.time.monotonic',return_value=400):self.r.recover_connection()
   self.r.connect.assert_called_once();self.assertEqual(self.r.reconnections,11)
  def test_recent_reconnections_still_enforce_bounded_recovery(self):
-  self.r.reconnect_times=[399]*self.r.cfg['reconnect_limit']
+  self.r.reconnect_times=[399]*9
   with patch('runner.time.monotonic',return_value=400):
    with self.assertRaisesRegex(RuntimeError,'5 分钟'):self.r.recover_connection()
   self.r.connect.assert_not_called()

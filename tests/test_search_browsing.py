@@ -103,7 +103,7 @@ class SearchStageBudget(unittest.TestCase):
   def recover():self.assertIsNone(r.search_deadline);self.assertIsNone(r.search_overall_deadline)
   r.return_from_search.side_effect=recover
   self.assertFalse(r.search_optional('AI video creation'))
-  self.assertIn('查找搜索框',r.feature_state['search']['reason']);r.return_from_search.assert_called_once()
+  self.assertTrue(any('查找搜索框' in e.get('reason','') for e in self.events));r.return_from_search.assert_called_once()
  def test_phase_progress_cannot_extend_overall_limit(self):
   r=self.r;r.search_overall_deadline=self.now+100
   for _ in range(3):r.search_stage('select_result');self.advance(30)
@@ -139,3 +139,50 @@ class SearchStageBudget(unittest.TestCase):
   r.http=Mock(side_effect=timeout)
   with self.assertRaisesRegex(SearchTimedOut,'提交搜索词'):r.command('POST','/element/query/value',{'text':'AI'})
   self.assertEqual(r.http.call_count,1)
+
+
+class SearchEntry(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+  self.r=Runner({**CFG,'runtime_dir':self.tmp.name},notify=lambda _:None);self.r.click=Mock();self.r.wait=Mock()
+ def viewer(self):
+  t=ET.Element('root')
+  for name in ('reels-viewer','sundial-viewer-video-collection-view','like-button','comment-button','back-button'):
+   ET.SubElement(t,'XCUIElementTypeButton',name=name,visible='true')
+  return t
+ def main(self):
+  t=ET.Element('root');ET.SubElement(t,'XCUIElementTypeButton',name='explore-tab',visible='true');return t
+ def test_deep_video_returns_before_opening_explore(self):
+  self.r.snapshot=Mock(side_effect=[self.viewer(),self.main()]);self.r.open_search_entry()
+  self.assertEqual([c.args[0] for c in self.r.click.call_args_list],['back-button','explore-tab'])
+ def test_unknown_draft_is_preserved(self):
+  t=self.viewer();ET.SubElement(t,'XCUIElementTypeTextView',name='composer',value='draft',visible='true')
+  self.r.snapshot=Mock(return_value=t)
+  with self.assertRaises(NavigationLost):self.r.open_search_entry()
+  self.r.click.assert_not_called()
+ def test_repeated_back_is_bounded(self):
+  self.r.snapshot=Mock(return_value=self.viewer())
+  with self.assertRaises(NavigationLost):self.r.open_search_entry()
+  self.assertEqual(self.r.click.call_count,5)
+
+
+class ReelsLoading(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+  self.r=Runner({**CFG,'runtime_dir':self.tmp.name},notify=lambda _:None);self.r.wait=Mock();self.r.click=Mock()
+  t=ET.Element('root')
+  for name in ('reels-viewer','sundial-viewer-video-collection-view','like-button','reels-tab'):
+   ET.SubElement(t,'XCUIElementTypeButton',name=name,value='1' if name=='reels-tab' else '',visible='true')
+  self.r.observe(t)
+ def test_partial_video_retries_reads_without_tapping_again(self):
+  self.r.read_reel=Mock(side_effect=[NavigationLost('loading'),{'key':'video'}])
+  self.assertEqual(self.r.confirm_reel_loaded(),{'key':'video'});self.assertEqual(self.r.read_reel.call_count,2);self.r.click.assert_not_called()
+ def test_loading_does_not_wait_forever(self):
+  self.r.read_reel=Mock(side_effect=NavigationLost('loading'))
+  with self.assertRaises(NavigationLost):self.r.confirm_reel_loaded()
+  self.assertEqual(self.r.read_reel.call_count,3)
+ def test_unknown_input_does_not_get_loading_retry(self):
+  ET.SubElement(self.r.last_tree,'XCUIElementTypeTextView',value='draft',visible='true');self.r.observe(self.r.last_tree)
+  self.r.read_reel=Mock(side_effect=NavigationLost('input'))
+  with self.assertRaises(NavigationLost):self.r.confirm_reel_loaded()
+  self.assertEqual(self.r.read_reel.call_count,1);self.r.wait.assert_not_called()

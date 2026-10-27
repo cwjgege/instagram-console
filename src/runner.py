@@ -29,8 +29,12 @@ from watch_policy import playback_timing,playback_progress,playback_finished,obs
 from watch_relevance import watch_related as caption_watch_related
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
+RECONNECT_QUICK_DELAYS=(0,2,5)
+RECONNECT_BACKOFF_DELAYS=(15,30,60)
+RECONNECT_WINDOW_SECONDS=300
+RECONNECT_WINDOW_LIMIT=9
 SEARCH_STAGE_SECONDS={
-    'open_explore':30,'locate_input':45,'focus_input':45,'submit_query':45,
+    'open_explore':60,'locate_input':45,'focus_input':45,'submit_query':45,
     'verify_results':60,'select_result':45,'open_video':45,'return_results':45,
     'scroll_results':45,'return_reels':60,
 }
@@ -62,7 +66,7 @@ def validate_motion(cfg):
             raise ValueError(f'{low} / {high} 须按从小到大填写，范围 {minimum}～{maximum}')
     if cfg['gesture_distance_max']>=cfg['gesture_bottom']-cfg['gesture_top']:
         raise ValueError('最大滑动距离必须小于安全区高度')
-    if not 1<=cfg['reconnect_limit']<=3:raise ValueError('本轮重连上限须为 1～3')
+    if not 1<=cfg['reconnect_limit']<=3:raise ValueError('延后重试次数须为 1～3，另有 3 次快速重试')
     if not 15<=cfg.get('usb_wait_seconds',60)<=180:raise ValueError('USB 重新接入等待须为 15～180 秒')
     if not (1<=cfg.get('search_videos_per_query',2)<=5 and 1<=cfg.get('search_result_scrolls',1)<=3
         and 5<=cfg.get('search_watch_min',10)<=cfg.get('search_watch_max',20)<=90):
@@ -184,6 +188,8 @@ class Runner:
         self.active_search_term = None
         self.feature_state = {'search': {'enabled': bool(config.get('enable_search')), 'reason': ''}}
         self.search_failures = 0
+        self.search_consecutive_failures = 0
+        self.search_retry_at = None
         self.search_step = None
         self.pause_requested=threading.Event()
         self.pause_state='running'
@@ -309,7 +315,7 @@ class Runner:
                 raise TransportLost('滑动时控制连接中断，放弃该动作并重新识别') from exc
             if not readonly or not transport_error(exc):raise
             # Only reads can be retried. Never replay a click, input, or gesture.
-            self.log('read_retry',message='页面读取连接异常，短暂等待后重试')
+            self.log('read_retry',message='页面读取超时或连接异常，短暂等待后重试')
             self.wait(.8)
             try:return send()
             except Exception as retry:
@@ -413,12 +419,16 @@ class Runner:
                 raise RuntimeError('等待 USB 重新接入超时。请重新连接、解锁这台 iPhone 后再开始；不会切换到其他手机或网络连接')
             self.wait(min(3,max(0,end-time.monotonic())))
 
-    def connect(self, force_new=False):
+    def connect(self, force_new=False, quick=False):
         self.log('connecting', message='正在连接指定 iPhone')
         import connections
         connection=connections.load(self.cfg['device_udid']) if self.managed else {'mode':'usb'}
         network=connection['mode']!='usb'
-        if not network:self.wait_for_usb()
+        if not network:
+            if quick:
+                from device_manager import usb_serials
+                if self.cfg['device_udid'].replace('-','').lower() not in usb_serials():raise TransportLost('指定 USB 手机尚未接入')
+            self.wait_for_usb()
         if self.managed:
             from device_manager import child_env,prepare_vendor,signing_record
             from runtime_manager import ensure_server,ensure_legacy
@@ -431,7 +441,7 @@ class Runner:
                 if legacy!=(record.get('controller')=='legacy16'):
                     raise SetupError('controller_mismatch','手机系统与已配置的控制组件不匹配，请在此设备向导安装对应的 iOS 16 / 新版组件。','设备支持')
             if network:
-                self.network_url=connections.ensure_wifi(self.cfg['device_udid'],notify,self.stop)
+                self.network_url=(connections.quick_wifi if quick else connections.ensure_wifi)(self.cfg['device_udid'],notify,self.stop)
                 force_new=True
             elif record and record.get('controller')=='legacy16':ensure_legacy(self.cfg['device_udid'],record,notify,self.stop)
         try:
@@ -502,7 +512,9 @@ class Runner:
                     except Exception:pass
             state.unlink(missing_ok=True);self.path=None
         payload = connections.network_payload(self.cfg,self.network_url) if network else json.loads((self.runtime / 'session-request.json').read_text())
-        payload['capabilities']['alwaysMatch']['appium:wdaConnectionTimeout']=20000
+        # Keyboard snapshots on the tested device take 24–27s; keep the proxy
+        # timeout below our 35s HTTP cap, with search phases still bounded.
+        payload['capabilities']['alwaysMatch']['appium:wdaConnectionTimeout']=30000
         payload['capabilities']['alwaysMatch']['appium:waitForIdleTimeout']=1
         # Old saved requests must not reset on-device developer trust by uninstalling WDA.
         payload['capabilities']['alwaysMatch']['appium:useNewWDA']=False
@@ -520,7 +532,7 @@ class Runner:
             if not network and record and record.get('controller')=='legacy16':caps['appium:webDriverAgentUrl']=f"http://127.0.0.1:{ports['wda']}"
         self.log('connecting',message='正在建立手机控制会话，停止时需等待当前连接命令结束…')
         positions=log_positions(self.runtime)
-        try:value=self.http('POST','/session',payload,timeout=240)
+        try:value=self.http('POST','/session',payload,timeout=45 if quick else 240)
         except Exception as exc:
             issue=classify_setup_error(exc,attempt_text(self.runtime,positions))
             if issue.code not in ('unknown','connection'):
@@ -546,25 +558,46 @@ class Runner:
 
     def recover_connection(self):
         self.check()
-        if self.in_interaction:
-            raise RuntimeError('互动过程中连接中断，结果未确认，已停止且不会重发')
-        if not self.cfg['reconnect_enabled']:
-            raise RuntimeError('控制连接中断，自动重连已关闭')
-        now=time.monotonic();self.reconnect_times=[t for t in self.reconnect_times if now-t<300]
-        while len(self.reconnect_times)<self.cfg['reconnect_limit']:
-            self.reconnections+=1;self.reconnect_times.append(time.monotonic())
-            self.log('reconnecting',message='正在重新建立手机控制连接',reconnections=self.reconnections)
-            self.wait(2)
+        if self.in_interaction:raise RuntimeError('互动过程中连接中断，结果未确认，已停止且不会重发')
+        if not self.cfg['reconnect_enabled']:raise RuntimeError('控制连接中断，自动重连已关闭')
+        delays=RECONNECT_QUICK_DELAYS+RECONNECT_BACKOFF_DELAYS[:self.cfg['reconnect_limit']]
+        for index,delay in enumerate(delays):
+            self.check()
+            now=time.monotonic();self.reconnect_times=[t for t in self.reconnect_times if now-t<RECONNECT_WINDOW_SECONDS]
+            if len(self.reconnect_times)>=RECONNECT_WINDOW_LIMIT:
+                raise RuntimeError('控制连接恢复失败，5 分钟内重连次数已用完；请检查手机与连接后重新开始')
+            quick=index<len(RECONNECT_QUICK_DELAYS);phase='快速重连' if quick else '延后重连'
+            self.log('reconnect_wait',message=phase+'：等待 '+str(delay)+' 秒后尝试',attempt=index+1,total=len(delays),delay_seconds=delay,phase='quick' if quick else 'backoff')
+            if delay:self.wait(delay)
+            self.check();self.reconnections+=1;self.reconnect_times.append(time.monotonic())
+            self.log('reconnecting',message='正在'+phase+'并检查视频页面',reconnections=self.reconnections,attempt=index+1,phase='quick' if quick else 'backoff')
             try:
-                self.connect(force_new=True)
-                self.recover_reels()
-            except Halt:raise
+                self.connect(force_new=True,quick=quick)
+                self.recover_reels(prefer_navigation=True)
+            except (Halt,PageBlocked):raise
             except Exception as exc:
-                if isinstance(exc,TransportLost) or transport_error(exc):continue
+                if isinstance(exc,TransportLost) or transport_error(exc) or isinstance(exc,NavigationLost):
+                    self.log('reconnect_attempt_failed',message='本次重连或视频页核验未完成，按计划继续尝试',attempt=index+1,reason=diagnostics.redact(str(exc)))
+                    continue
                 raise
-            self.log('reconnected',message='连接已恢复，重新识别视频后继续')
+            self.skip_interactions_once=True;self.current_post_key=None
+            self.log('reconnected',message='连接及视频页面已恢复，继续浏览；跳过恢复时视频的互动',reconnections=self.reconnections,attempt=index+1)
             return
-        raise RuntimeError('控制连接恢复失败，5 分钟内重连次数已用完；请检查当前连接、手机解锁状态及控制服务后重新开始')
+        raise RuntimeError('控制连接恢复失败，3 次快速重试及延后重试次数已用完；请检查手机与连接后重新开始')
+
+    def confirm_reel_loaded(self):
+        for attempt in range(3):
+            try:return self.read_reel()
+            except NavigationLost:
+                tree=self.last_tree
+                nodes=visible_nodes(tree) if tree is not None else []
+                names={e.get('name') for e in nodes}
+                selected=any(e.get('name')=='reels-tab' and e.get('value')=='1' for e in nodes)
+                loading=(self.page_state is not None and self.page_state.kind=='main' and selected
+                    and {'reels-viewer','sundial-viewer-video-collection-view'}<=names)
+                if not loading or attempt==2:raise
+                self.log('reels_loading',message='已进入 Reels，正在等待视频控件加载；暂不重复导航',attempt=attempt+1)
+                self.wait(.8)
 
     def reels(self, initial_tree=None):
         # A caller may pass the tree it just verified, with no intervening action.
@@ -579,7 +612,7 @@ class Runner:
             state=self.observe(tree)
             if state.kind in ('input_unknown','sheet'):raise NavigationLost(state.reason)
             if state.kind=='reels':
-                self.read_reel()
+                self.confirm_reel_loaded()
                 self.log('reels_returned',message='已确认返回短视频页',seconds=round(time.monotonic()-started,3))
                 return
             names={e.get('name') for e in visible_nodes(tree)}
@@ -595,7 +628,7 @@ class Runner:
             tree=None
             self.wait(.7)
             if target=='reels-tab':
-                self.read_reel()
+                self.confirm_reel_loaded()
                 self.log('reels_returned',message='已确认返回短视频页',seconds=round(time.monotonic()-started,3))
                 return
         raise NavigationLost('返回 Instagram 主页面的尝试已用完')
@@ -691,7 +724,7 @@ class Runner:
                 self.log('watch_stalled',message='播放进度持续不变，停止等待并准备翻页',progress=following);return
             progress=following
 
-    def recover_reels(self):
+    def recover_reels(self,prefer_navigation=False):
         """Navigate only with observed controls; abandon the previous post on recovery."""
         self.check()
         if not self.cfg.get('recovery_enabled',True):
@@ -699,6 +732,17 @@ class Runner:
         self.recovery_times=[t for t in self.recovery_times if time.monotonic()-t<300]
         if len(self.recovery_times)>=self.cfg.get('recovery_run_limit',5):
             raise RuntimeError('最近 5 分钟内页面恢复过于频繁，已停止，请检查手机页面或连接')
+        if prefer_navigation:
+            try:tree=self.snapshot();state=self.observe(tree)
+            except NavigationLost:tree=state=None
+            if state is not None and state.kind=='input_unknown':raise PageBlocked(state.reason)
+            if state is not None and state.kind in ('search_input','search_context','search_results','explore','profile','main','reels'):
+                self.reels(initial_tree=tree)
+                post=self.read_reel()
+                self.recoveries+=1;self.recovery_times.append(time.monotonic());self.navigation_epoch+=1
+                self.position=self.back_depth=self.stagnant=self.unchanged_swipes=0;self.refresh_required=False
+                self.log('recovered',message='重连后已通过已识别导航回到视频页',recoveries=self.recoveries)
+                return post
         attempts=max(1,min(5,int(self.cfg.get('recovery_attempts',3))))
         previous_action=None
         self.log('recovering',message='页面识别异常，正在尝试恢复 Reels')
@@ -741,7 +785,8 @@ class Runner:
                 and any(e.get('name')=='reels-tab' and e.get('value')=='1' for e in nodes))
             search_back=search_back_name(tree)
             search_back=search_back or next((name for name in ('Cancel','BackButton') if name in names),None)
-            known_search=state.kind in ('search_input','search_context','search_results') and bool(search_back)
+            if state.kind=='explore' and search_input_node(tree) is not None and 'reels-tab' in names:search_back='reels-tab'
+            known_search=state.kind in ('search_input','search_context','search_results','explore') and bool(search_back)
             known_collection=collection_sheet_close(tree) is not None
             if (fields or state.kind=='input_unknown') and not known_chat and not known_search and not known_collection:
                 raise RuntimeError('页面包含输入框，已停止恢复，保留当前输入内容')
@@ -1078,7 +1123,7 @@ class Runner:
     def return_from_search(self):
         """Small independent navigation budget; never consumes general recovery quota."""
         if not self.cfg.get('recovery_enabled',True):
-            raise RuntimeError('搜索已禁用，但自动恢复已关闭，请手动返回短视频页')
+            raise RuntimeError('搜索已暂停，但自动恢复已关闭，请手动返回短视频页')
         for attempt in range(5):
             self.check()
             tree=self.snapshot();state=self.observe(tree)
@@ -1121,25 +1166,54 @@ class Runner:
         if self.search_overall_deadline is not None:self.search_deadline=min(self.search_deadline,self.search_overall_deadline)
         self.log('search_stage',message='搜索：'+SEARCH_STAGE_LABELS[stage],stage=stage,budget_seconds=round(budget,1))
 
+    def search_ready(self):
+        if self.feature_state['search']['enabled']:return True
+        if self.search_retry_at is None or time.monotonic()<self.search_retry_at:return False
+        self.search_retry_at=None
+        if self.search_attempts>=self.cfg['max_searches_per_run']:
+            self.feature_state['search']={'enabled':False,'reason':'本轮搜索次数上限已到，继续浏览'}
+            self.log('feature_disabled',message='本轮搜索次数上限已到，继续短视频浏览',feature='search')
+            return False
+        self.feature_state['search']={'enabled':True,'reason':''}
+        self.log('search_reenabled',message='搜索冷却结束，允许按计划尝试下一次搜索')
+        return True
+
     def search_optional(self, term):
-        if not self.feature_state['search']['enabled']:return False
+        if not self.search_ready():return False
         self.active_search_term=term
         self.search_deadline=None
         budget=search_budget_seconds(self.cfg);self.search_overall_deadline=time.monotonic()+budget
         self.log('search_budget',message='搜索使用独立阶段预算，正常观看不占用页面跳转预算',total_seconds=budget)
         try:
             self.search(term)
+            self.search_consecutive_failures=0;self.search_retry_at=None
+            self.feature_state['search']={'enabled':True,'reason':''}
             return True
         except (Halt,PageBlocked):raise
         except Exception as exc:
             self.search_deadline=None;self.search_overall_deadline=None
-            self.search_failures+=1
-            self.feature_state['search']={'enabled':False,'reason':str(exc) if isinstance(exc,SearchTimedOut) else '本轮搜索异常，已暂停搜索'}
+            self.search_failures+=1;self.search_consecutive_failures+=1
+            self.feature_state['search']={'enabled':False,'reason':'搜索失败，正在恢复视频浏览'}
             self.diagnose('search',exc)
-            self.log('feature_disabled',message='本轮搜索已暂停，正在确认能否继续短视频浏览',feature='search',reason=diagnostics.redact(str(exc)))
+            self.log('search_recovering',message='本次搜索已放弃，正在确认能否继续短视频浏览',reason=diagnostics.redact(str(exc)))
             if isinstance(exc,TransportLost) or transport_error(exc):
-                raise TransportLost('搜索期间连接中断，暂停搜索并尝试恢复连接') from exc
-            self.return_from_search()
+                self.recover_connection()
+            else:
+                try:self.return_from_search()
+                except TransportLost:self.recover_connection()
+                except NavigationLost as recovery:raise RuntimeError('搜索恢复未能确认视频页面，请检查连接和手机页面后重新开始') from recovery
+            # Schedule from successful recovery, never from the start of a long search.
+            if self.search_consecutive_failures>=3 or self.search_attempts>=self.cfg['max_searches_per_run']:
+                self.search_retry_at=None
+                reason='连续三次搜索失败，本轮停用搜索，继续浏览' if self.search_consecutive_failures>=3 else '本轮搜索次数上限已到，继续浏览'
+                self.feature_state['search']={'enabled':False,'reason':reason}
+                self.log('feature_disabled',message=reason,feature='search')
+            else:
+                delay=self.rng.uniform(180,360) if self.search_consecutive_failures==1 else self.rng.uniform(360,600)
+                self.search_retry_at=time.monotonic()+delay
+                reason='搜索冷却中，约 '+str(round(delay))+' 秒后重试；继续浏览'
+                self.feature_state['search']={'enabled':False,'reason':reason,'cooldown':True}
+                self.log('search_cooldown',message=reason,retry_seconds=round(delay),consecutive_failures=self.search_consecutive_failures)
             return False
         finally:
             self.search_deadline=None;self.search_overall_deadline=None
@@ -1157,13 +1231,33 @@ class Runner:
             if attempt<2:self.wait(.7)
         raise NavigationLost('未能唯一识别顶部搜索输入区，尝试返回 Reels')
 
+    def open_search_entry(self):
+        # Search/profile viewers can hide the bottom tabs. Follow only observed
+        # navigation controls; never back out of an unknown form or modal.
+        for _ in range(5):
+            tree=self.snapshot();state=self.observe(tree);nodes=visible_nodes(tree)
+            buttons=[e for e in nodes if e.tag=='XCUIElementTypeButton' and e.get('enabled','true')=='true']
+            if sum(e.get('name')=='explore-tab' for e in buttons)==1:
+                self.click('explore-tab');return
+            if state.kind in ('input_unknown','sheet','unknown'):raise NavigationLost('搜索入口被未知页面或输入内容遮挡，已保留页面')
+            back=profile_back_name(tree)
+            if state.kind in ('search_input','search_context','search_results'):back=search_back_name(tree)
+            names={e.get('name') for e in nodes}
+            if state.kind=='reels' and {'reels-viewer','sundial-viewer-video-collection-view'}<=names and sum(e.get('name')=='back-button' for e in buttons)==1:
+                back='back-button'
+            if not back:raise NavigationLost('当前页面没有可确认的搜索入口或返回按钮')
+            self.click(back);self.wait(.5)
+            self.log('search_entry_back',message='已通过可识别的返回入口查找搜索导航')
+        raise NavigationLost('返回搜索入口的尝试已用完，暂停本轮搜索')
+
     def search(self, term):
         if not ai_comments.english_text(term):
             self.log('search_skip',message='搜索词不是英文，已跳过')
             return
         self.search_attempts+=1
         self.search_stage('open_explore')
-        self.click('explore-tab')
+        if self.find('explore-tab',optional=True):self.click('explore-tab')
+        else:self.open_search_entry()
         self.wait(.7)
         self.search_stage('locate_input')
         eid=self.search_input()
@@ -1352,9 +1446,9 @@ class Runner:
                             self.ai_comment(post)
                             self.in_interaction=False
                         if (not self.browse_only and self.cfg['enable_search'] and self.cfg['keywords']
-                            and self.feature_state['search']['enabled'] and self.search_attempts<self.cfg['max_searches_per_run'] and time.monotonic()>=next_search):
-                            next_search=time.monotonic()+self.rng.uniform(180,360)
-                            self.search_optional(self.rng.choice(self.cfg['keywords']))
+                            and self.search_ready() and self.search_attempts<self.cfg['max_searches_per_run'] and time.monotonic()>=next_search):
+                            try:self.search_optional(self.rng.choice(self.cfg['keywords']))
+                            finally:next_search=time.monotonic()+self.rng.uniform(180,360)
                             last_key=None
                             self.back_depth=0
                             self.position=0
@@ -1423,7 +1517,7 @@ class Runner:
             summary={'status':status,'counts':self.counts,'swipes':self.swipes,'searches':self.searches,
                      'log_dir':str(self.log_dir),'run_id':self.run_id,'recoveries':self.recoveries,
                      'reconnections':self.reconnections,'search_videos':self.search_videos,'search_attempts':self.search_attempts,
-                     'feature_state':self.feature_state,'search_failures':self.search_failures,
+                     'feature_state':self.feature_state,'search_failures':self.search_failures,'search_consecutive_failures':self.search_consecutive_failures,
                      'page_state':self.page_state.kind if self.page_state else 'unknown'}
             try:
                 atomic_json(self.log_dir/'summary.json',summary)

@@ -137,7 +137,7 @@ class DynamicRelayPorts(unittest.TestCase):
    record={'udid':UDID,'bundle_id':BUNDLE};proof={}
    def launch(*args,**kwargs):
     cfg=json.loads((base/'controller-request.json').read_text())
-    self.assertEqual((cfg['local_wda'],cfg['local_mjpeg']),(0,0));self.assertEqual(cfg['relay_protocol'],2)
+    self.assertEqual((cfg['local_wda'],cfg['local_mjpeg']),(0,0));self.assertEqual(cfg['relay_protocol'],2);self.assertEqual(cfg['health_protocol'],1)
     proof.update(event='controller_ready',udid=UDID,bundle=BUNDLE,fingerprint='new',ios='26.6',local_wda=51001,local_mjpeg=51002,attempt_id=cfg['attempt_id'])
     kwargs['stdout'].write(b'"Xcode diagnostic string"\n[]\n')
     kwargs['stdout'].write((json.dumps(proof)+'\n').encode());kwargs['stdout'].flush()

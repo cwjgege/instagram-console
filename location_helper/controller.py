@@ -37,9 +37,30 @@ class IdentityMismatch(RuntimeError):pass
 async def identity(rsd,cfg):
     status=await asyncio.wait_for(response(rsd,cfg['remote_wda'],'/status'),3)
     info=await asyncio.wait_for(response(rsd,cfg['remote_wda'],'/wda/device/info'),3)
-    if status.get('build',{}).get('productBundleIdentifier') not in {cfg['bundle'],cfg['bundle'].removesuffix('.xctrunner')}:raise IdentityMismatch('Paired WDA signing bundle differs from this device record')
-    if status.get('ready') is not True or not info.get('uuid') or info['uuid']=='unknown':raise RuntimeError('Paired WDA not ready')
+    verify_status(status,cfg)
+    if not info.get('uuid') or info['uuid']=='unknown':raise RuntimeError('Paired WDA not ready')
     return status,info
+
+def verify_status(status,cfg):
+    if status.get('build',{}).get('productBundleIdentifier') not in {cfg['bundle'],cfg['bundle'].removesuffix('.xctrunner')}:raise IdentityMismatch('Paired WDA signing bundle differs from this device record')
+    if status.get('ready') is not True:raise RuntimeError('Paired WDA not ready')
+
+async def health(rsd,cfg,expected,busy):
+    # The tunnel is already pinned to the paired UDID. Device-info needs the UI
+    # thread and can queue behind a snapshot; do not compete with active control.
+    status=await asyncio.wait_for(response(rsd,cfg['remote_wda'],'/status'),3)
+    verify_status(status,cfg)
+    if not busy:
+        current=await asyncio.wait_for(response(rsd,cfg['remote_wda'],'/wda/device/info'),3)
+        if not current.get('uuid') or current['uuid']=='unknown':raise RuntimeError('Paired WDA identity unavailable')
+        if current['uuid']!=expected:raise IdentityMismatch('WDA identity changed while relaying')
+
+class HealthWindow:
+    def __init__(self):self.failed_since=None
+    def recovered(self):self.failed_since=None
+    def failed(self,now):
+        if self.failed_since is None:self.failed_since=now
+        return now-self.failed_since>=90
 
 async def launch_standard(cfg):
     executable=Path(cfg.get('xcodebuild',''));spec=Path(cfg.get('xctestrun',''))
@@ -83,15 +104,19 @@ async def serve(cfg,emit):
     async with UserspaceRsdTunnel(serial=cfg['udid'],autopair=False,remotepairing_fallback=False) as rsd:
         if rsd.udid.replace('-','').lower()!=cfg['udid'].replace('-','').lower():raise IdentityMismatch('Paired device mismatch')
         status,info,child=await ready(rsd,cfg,emit)
-        servers=[];clients=set()
+        servers=[];clients=set();loop=asyncio.get_running_loop();last_control_activity=[loop.time()]
         async def relay(reader,writer,remote):
             owner=asyncio.current_task();clients.add(owner)
             try:
                 async with await rsd.create_service_connection(remote) as conn:
                     async def upload():
-                        while chunk:=await reader.read(65536):await conn.sendall(chunk)
+                        while chunk:=await reader.read(65536):
+                            if remote==cfg['remote_wda']:last_control_activity[0]=loop.time()
+                            await conn.sendall(chunk)
                     async def download():
-                        while chunk:=await conn.recv_any(65536):writer.write(chunk);await writer.drain()
+                        while chunk:=await conn.recv_any(65536):
+                            if remote==cfg['remote_wda']:last_control_activity[0]=loop.time()
+                            writer.write(chunk);await writer.drain()
                     streams=[asyncio.create_task(upload()),asyncio.create_task(download())]
                     try:await asyncio.wait(streams,return_when=asyncio.FIRST_COMPLETED)
                     finally:
@@ -105,18 +130,17 @@ async def serve(cfg,emit):
             for local,remote in ((cfg['local_wda'],cfg['remote_wda']),(cfg['local_mjpeg'],cfg['remote_mjpeg'])):
                 servers.append(await asyncio.start_server(lambda r,w,p=remote:relay(r,w,p),'127.0.0.1',local))
             emit('controller_ready',udid=cfg['udid'],fingerprint=info['uuid'],bundle=status['build']['productBundleIdentifier'],ios=status['os']['version'],local_wda=servers[0].sockets[0].getsockname()[1],local_mjpeg=servers[1].sockets[0].getsockname()[1],attempt_id=cfg.get('attempt_id'))
-            failures=0
+            failures=HealthWindow()
             while True:
                 await asyncio.sleep(3)
                 if child is not None and child.returncode is not None:raise RuntimeError('标准 Xcode 控制会话已结束，退出码 '+str(child.returncode))
                 try:
-                    _,current=await identity(rsd,cfg)
-                    if current['uuid']!=info['uuid']:raise IdentityMismatch('WDA identity changed while relaying')
-                    failures=0
+                    await health(rsd,cfg,info['uuid'],loop.time()-last_control_activity[0]<10)
+                    failures.recovered()
                 except IdentityMismatch:raise
                 except Exception:
-                    failures+=1
-                    if failures>=3:raise RuntimeError('独立无线通道连续三次未能读回控件状态，需要重新连接。') from None
+                    if failures.failed_since is None:emit('controller_health_degraded',reason='状态读取暂不可用，保留当前控制通道并等待恢复')
+                    if failures.failed(loop.time()):raise RuntimeError('独立无线通道持续 90 秒未能通过健康检查，需要重新连接。') from None
         finally:
             for server in servers:server.close();await server.wait_closed()
             for client in list(clients):client.cancel()

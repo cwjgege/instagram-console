@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.26**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.29**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.26 系统提醒处理测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.26/Instagram-Console-1.2.26-AppleSilicon.dmg)
+[下载 v1.2.29 重连优化与搜索兜底测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.29/Instagram-Console-1.2.29-AppleSilicon.dmg)
 
-[查看 v1.2.26 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.26)
+[查看 v1.2.29 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.29)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -352,3 +352,11 @@ helper 就绪事件返回真实控制、预览端口及本次启动标识；GUI 
 ## 1.2.26 已识别系统提醒
 
 在控制通道可用时，对本次识别的 SpringBoard Apple Account Verification 提醒点击唯一的 Not Now，每轮最多一次，随后重新核验 Instagram 前台。仅接受匹配标题、正文与两个按钮且没有输入框的弹窗；再次出现或其他验证保留手动处理。此功能暂时关闭提醒，不处理账号密码或根除账号验证问题，也不能在手机控制组件尚未启动时点击弹窗。
+
+## 1.2.29 重连优化与搜索兜底
+
+断线先做三次快速重连：第一次立即尝试，之后分别等待 2 秒、5 秒；快速阶段只复用并重新核验已绑定的无线控件，不扫描、启动或重签组件。再按 15 秒、30 秒、60 秒延后尝试，次数由“延后重试次数”控制（1～3，默认 2，默认共 5 次）；为防止重连风暴，每 5 分钟最多 9 次。连接和页面读取耗时另算。只有确认视频页已恢复才继续浏览，恢复时的视频跳过互动；未知输入、验证或身份不一致不会被清除或绕过。
+
+搜索失败后放弃当前查询，安全返回或有限重连，确认回到视频页后才开始 180～360 秒冷却；再次连续失败延长到 360～600 秒。冷却期间继续浏览，到期后按搜索次数上限再次尝试；连续三次失败或次数用尽则仅停用本轮搜索。重连或安全返回失败会停止并触发本地声音通知。修复深层视频隐藏搜索导航、发现页空搜索框被误判、键盘快照超过旧 20 秒代理上限，以及返回视频页加载中的过早失败；独立无线通道对短暂后台检查失败保留通道，持续失败 90 秒后退出，身份不一致或 Xcode 退出仍立即失败。
+
+525 项自动测试、模拟界面与安装包自检通过。本轮按用户最终要求仅验证 td’s iPhone：拔线纯 Wi-Fi 下，从搜索页构造失效会话，一次快速恢复并回到视频页约 23.6 秒；再由测试脚本模拟前三次连接失败，第 4 次延后连接恢复并完成翻页约 51.7 秒。没有执行物理路由器断网或手机断电测试。此前两台 USB 搜索兜底已验证，但本版不宣称修复 ZHENKAI’s 的无线测试进程退出与冷启动失败；这台本轮未继续复测。小火箭节点、代理模式与规则未修改。

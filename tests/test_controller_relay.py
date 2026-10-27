@@ -76,3 +76,28 @@ class RelayRoundTrip(unittest.IsolatedAsyncioTestCase):
   children=[await asyncio.create_subprocess_exec(sys.executable,'-c',script,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT) for _ in range(2)]
   outputs=await asyncio.wait_for(asyncio.gather(*(p.communicate() for p in children)),15)
   for process,output in zip(children,outputs):self.assertEqual(process.returncode,0,output[0].decode())
+
+class RelayHealth(unittest.IsolatedAsyncioTestCase):
+ async def test_busy_control_checks_bundle_without_queuing_ui_identity_request(self):
+  response=AsyncMock(return_value={'ready':True,'build':{'productBundleIdentifier':BUNDLE}})
+  with patch.object(controller,'response',response):
+   await controller.health(object(),{'remote_wda':8100,'bundle':BUNDLE},'pin',True)
+  self.assertEqual([c.args[2] for c in response.call_args_list],['/status'])
+ async def test_idle_rechecks_fingerprint_and_rejects_changes(self):
+  response=AsyncMock(side_effect=[{'ready':True,'build':{'productBundleIdentifier':BUNDLE}},{'uuid':'different'}])
+  with patch.object(controller,'response',response):
+   with self.assertRaises(controller.IdentityMismatch):await controller.health(object(),{'remote_wda':8100,'bundle':BUNDLE},'pin',False)
+ async def test_wrong_bundle_is_rejected_even_while_busy(self):
+  with patch.object(controller,'response',AsyncMock(return_value={'ready':True,'build':{'productBundleIdentifier':'wrong'}})):
+   with self.assertRaises(controller.IdentityMismatch):await controller.health(object(),{'remote_wda':8100,'bundle':BUNDLE},'pin',True)
+ async def test_idle_missing_identity_is_not_accepted(self):
+  response=AsyncMock(side_effect=[{'ready':True,'build':{'productBundleIdentifier':BUNDLE}},{'uuid':'unknown'}])
+  with patch.object(controller,'response',response):
+   with self.assertRaises(RuntimeError):await controller.health(object(),{'remote_wda':8100,'bundle':BUNDLE},'pin',False)
+ def test_slow_snapshot_three_probe_failures_do_not_kill_relay(self):
+  window=controller.HealthWindow()
+  for now in (0,6,12,24,35,60,89):self.assertFalse(window.failed(now))
+  self.assertTrue(window.failed(90))
+ def test_success_resets_consecutive_failure_duration(self):
+  window=controller.HealthWindow();self.assertFalse(window.failed(0));window.recovered()
+  self.assertFalse(window.failed(89));self.assertFalse(window.failed(178));self.assertTrue(window.failed(179))

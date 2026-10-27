@@ -87,6 +87,7 @@ class SessionLifecycle(unittest.TestCase):
   with patch('runner.call',side_effect=[{},dict(sessionId='new',capabilities={'udid':'A'*20})]) as call:
    self.r.connect()
    self.assertFalse(call.call_args.args[2]['capabilities']['alwaysMatch']['appium:useNewWDA'])
+   self.assertEqual(call.call_args.args[2]['capabilities']['alwaysMatch']['appium:wdaConnectionTimeout'],30000)
  def test_forced_reconnect_does_not_uninstall_phone_component(self):
   (self.base/'session-request.json').write_text(json.dumps({'capabilities':{'alwaysMatch':{'appium:udid':'A'*20,'appium:useNewWDA':True}}}))
   with patch('runner.call',side_effect=[{},None,dict(sessionId='new',capabilities={'udid':'A'*20})]) as call:
