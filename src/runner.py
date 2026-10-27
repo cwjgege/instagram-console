@@ -25,7 +25,7 @@ import diagnostics
 from page_state import (PageBlocked, classify, visible_nodes, screen_height, search_input_node, search_layout, search_back_name, profile_back_name, collection_sheet_nodes, collection_sheet_close)
 from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
 from session_context import current as session_context
-from watch_policy import playback_timing,playback_progress,playback_finished,watch_plan
+from watch_policy import playback_timing,playback_progress,playback_finished,observed_progress,watch_plan,replay_probability
 from watch_relevance import watch_related as caption_watch_related
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
@@ -605,45 +605,59 @@ class Runner:
         now=time.monotonic();key=post.get('key')
         current=getattr(self,'video_watch',None)
         if not key or not current or current['key']!=key:
-            plan=watch_plan(post if key else {},related,self.rng)
-            anchor=post.get('timing_at' if plan['basis']=='duration' else 'observed_at',now)
+            plan=watch_plan(post if key else {},related and bool(key),self.rng)
+            anchor=post.get('observed_at',now)
             if not isinstance(anchor,(int,float)) or not 0<=now-anchor<=3600:anchor=now
-            current={**plan,'key':key,'deadline':anchor+plan['seconds'],'fallback_deadline':anchor+(10 if related else 5)}
+            current={**plan,'key':key,'related':related,'deadline':anchor+plan['seconds'] if plan['seconds'] is not None else None,
+                     'done':False,'waiting_restart':False}
             self.video_watch=current
-        remaining=max(0,current['deadline']-now)
-        self.log('watch_timing',message={'duration':'按视频进度安排观看','progress':'观察播放进度，接近结束即翻页','fallback':'未读取到可靠进度，使用短停留上限','short':'不相关内容，随机短看后跳过'}[current['basis']],
-                 timing_source=current['basis'],duration=current['duration'],remaining_seconds=round(remaining,2))
-        progress=post.get('progress') if key and current['basis']!='short' else None;unchanged_since=now
-        if remaining<=0:return
-        if progress is None:
-            self.wait(remaining);return
+        if current['done']:return
+        if not current['complete_intent']:
+            remaining=max(0,current['deadline']-now)
+            self.log('watch_timing',message='相关内容，本次选择短看后跳过' if related else '不相关内容，随机短看后跳过',
+                     timing_source='short',remaining_seconds=round(remaining,2),complete_probability=current['complete_probability'])
+            self.wait(remaining);current['done']=True;return
+        self.log('watch_timing',message='本次选择按进度看到结束附近，无固定秒数上限',timing_source=current['basis'],
+                 related=related,duration=current['duration'],complete_probability=current['complete_probability'])
+        def complete_cycle(progress,restarted):
+            if current['pass_index']>=2 or self.rng.random()>=replay_probability(related):
+                current['done']=True
+                self.log('watch_complete',message='本次观看结束，准备翻页',progress=progress);return True
+            replay=watch_plan({'progress':progress},related,self.rng,pass_index=2)
+            current.update(replay)
+            if not replay['complete_intent']:
+                current['deadline']=time.monotonic()+replay['seconds']
+                self.log('watch_replay_brief',message='已看过一遍，本次回看倾向提前退出',seconds=round(replay['seconds'],2))
+                self.wait(replay['seconds']);current['done']=True;return True
+            current['waiting_restart']=not restarted
+            self.log('watch_replay_complete',message='本次回看选择继续看到结束附近')
+            return False
+        progress=observed_progress(post);unchanged_since=now;missing=0
         while True:
-            if playback_finished(None,progress):
-                current['deadline']=time.monotonic()
-                self.log('watch_complete',message='视频播放已接近结束，准备翻页',progress=progress);return
-            remaining=current['deadline']-time.monotonic()
-            if remaining<=0:return
-            self.wait(min(1.5,remaining))
-            if time.monotonic()>=current['deadline']:return
-            self.watch_read_deadline=current['deadline']
+            if progress is None:
+                missing+=1
+                if missing>=3:
+                    current['done']=True
+                    self.log('watch_progress_unavailable',message='多次未读到播放进度，停止等待本条视频');return
+            elif not current['waiting_restart'] and playback_finished(None,progress):
+                if complete_cycle(progress,False):return
+            self.wait(1.5)
+            self.watch_read_deadline=time.monotonic()+8
             try:fresh=self.read_reel()
-            except WatchBudgetExpired:
-                self.log('watch_budget_used',message='本条观看预算已用完，停止等待进度');return
+            except WatchBudgetExpired as exc:raise TransportLost('播放进度读取超时，需要重新检查控制连接') from exc
             finally:self.watch_read_deadline=None
-            if fresh.get('key')!=key:
-                raise InteractionSkipped('观看期间视频已变化，跳过旧视频互动')
-            following=fresh.get('progress');now=time.monotonic()
+            if fresh.get('key')!=key:raise InteractionSkipped('观看期间视频已变化，跳过旧视频互动')
+            following=observed_progress(fresh);now=time.monotonic()
             if following is None:
-                # Loss of timing must not grant another full dwell period.
-                current['deadline']=min(current['deadline'],current['fallback_deadline'])
-                self.log('watch_progress_unavailable',message='播放进度暂不可读，缩短本条剩余等待')
-                self.wait(max(0,current['deadline']-now));return
-            if playback_finished(progress,following):
-                current['deadline']=now
-                self.log('watch_complete',message='检测到播放结束或进度回到开头，准备翻页',progress=following);return
+                progress=None;continue
+            missing=0
+            if current['waiting_restart']:
+                if following<95:current['waiting_restart']=False
+            elif progress is not None and playback_finished(progress,following):
+                if complete_cycle(following,following<97):return
             if following!=progress:unchanged_since=now
-            elif now-unchanged_since>=8:
-                current['deadline']=now
+            elif now-unchanged_since>=30:
+                current['done']=True
                 self.log('watch_stalled',message='播放进度持续不变，停止等待并准备翻页',progress=following);return
             progress=following
 

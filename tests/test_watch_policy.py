@@ -1,111 +1,111 @@
-import sys,json,tempfile,time,unittest
+import sys,json,tempfile,unittest,itertools
 from pathlib import Path
 from unittest.mock import Mock,patch
 import xml.etree.ElementTree as ET
 sys.path.insert(0,str(Path('src').resolve()))
-from watch_policy import playback_timing,watch_plan
-from runner import Runner
+from watch_policy import playback_timing,playback_progress,playback_finished,watch_plan,observed_progress
+from runner import Runner,WatchBudgetExpired,TransportLost
 CFG=json.loads(Path('src/default-config.json').read_text())
-def progress(value,**attrs):
- return ET.Element('XCUIElementTypeSlider',{'visible':'true','name':'Video playback','value':value,**attrs})
-class WatchPolicy(unittest.TestCase):
- def setUp(self):
-  self.rng=Mock();self.rng.uniform.side_effect=lambda low,high:high
- def test_short_clip_is_not_scheduled_for_many_loops(self):
-  plan=watch_plan({'playback':{'elapsed':0,'duration':10}},True,self.rng)
-  self.assertAlmostEqual(plan['seconds'],11.5);self.assertEqual(plan['basis'],'duration')
- def test_current_position_is_subtracted(self):
-  plan=watch_plan({'playback':{'elapsed':9,'duration':10}},True,self.rng)
-  self.assertAlmostEqual(plan['seconds'],2.5)
- def test_long_video_is_sampled_instead_of_waiting_minutes(self):
-  self.assertEqual(watch_plan({'playback':{'elapsed':0,'duration':600}},True,self.rng)['seconds'],25)
- def test_unknown_duration_has_a_short_hard_dwell_ceiling(self):
-  self.assertEqual(watch_plan({},True,self.rng)['seconds'],10)
-  self.assertEqual(watch_plan({},False,self.rng)['seconds'],5)
- def test_invalid_timing_uses_fallback(self):
-  for timing in ({'elapsed':0,'duration':float('inf')},{'elapsed':11,'duration':10},{'elapsed':False,'duration':10}):
-   self.assertEqual(watch_plan({'playback':timing},True,self.rng)['basis'],'fallback')
- def test_parser_requires_a_player_progress_control(self):
-  self.assertEqual(playback_timing([progress('00:03 / 00:10')]),{'elapsed':3,'duration':10})
-  self.assertEqual(playback_timing([progress('0:03 of 0:10')]),{'elapsed':3,'duration':10})
-  for node in (ET.Element('XCUIElementTypeStaticText',visible='true',label='Video playback 00:03 / 00:10'),progress('30%'),progress('00:03 / 00:10',visible='false'),progress('00:03 / 00:10',name='Upload')):
-   self.assertIsNone(playback_timing([node]))
- def test_conflicting_player_controls_are_not_guessed(self):
-  self.assertIsNone(playback_timing([progress('00:03 / 00:10'),progress('00:03 / 00:20')]))
- def runner(self,folder):
-  r=Runner({**CFG,'runtime_dir':folder},notify=lambda _:None);r.rng=self.rng;r.wait=Mock();return r
- def test_accessibility_read_and_navigation_time_already_count(self):
-  with tempfile.TemporaryDirectory() as folder:
-   r=self.runner(folder)
-   with patch('runner.time.monotonic',return_value=106):r.watch_video({'key':'clip','observed_at':100},True)
-   r.wait.assert_called_once_with(4)
- def test_failed_swipe_does_not_restart_random_dwell_for_same_clip(self):
-  with tempfile.TemporaryDirectory() as folder:
-   r=self.runner(folder)
-   with patch('runner.time.monotonic',return_value=100):r.watch_video({'key':'clip','observed_at':100},True)
-   r.wait.reset_mock()
-   with patch('runner.time.monotonic',return_value=115):r.watch_video({'key':'clip','observed_at':114},True)
-   r.wait.assert_not_called();self.assertEqual(self.rng.uniform.call_count,1)
- def test_new_clip_gets_a_new_watch_budget(self):
-  with tempfile.TemporaryDirectory() as folder:
-   r=self.runner(folder)
-   with patch('runner.time.monotonic',return_value=100):r.watch_video({'key':'old'},True)
-   with patch('runner.time.monotonic',return_value=115):r.watch_video({'key':'new'},True)
-   self.assertEqual(r.wait.call_args.args,(10,));self.assertEqual(self.rng.uniform.call_count,2)
- def test_playback_position_anchor_is_not_double_counted_as_navigation_time(self):
-  with tempfile.TemporaryDirectory() as folder:
-   r=self.runner(folder)
-   with patch('runner.time.monotonic',return_value=108):r.watch_video({'key':'clip','observed_at':100,'timing_at':106,'playback':{'elapsed':5,'duration':10}},True)
-   self.assertAlmostEqual(r.wait.call_args.args[0],4.5)
+def slider(value,**attrs):return ET.Element('XCUIElementTypeSlider',{'visible':'true','name':'Video playback','value':value,**attrs})
+class Policy(unittest.TestCase):
+ def setUp(self):self.rng=Mock();self.rng.random.return_value=0;self.rng.uniform.side_effect=lambda a,b:b
+ def test_related_known_short_and_long_videos_have_no_seconds_cap(self):
+  for duration in (10,600,1800):
+   p=watch_plan({'playback':{'elapsed':3,'duration':duration}},True,self.rng)
+   self.assertIsNone(p['seconds']);self.assertTrue(p['complete_intent']);self.assertEqual(p['pass_index'],1);self.assertEqual(p['duration'],duration)
+ def test_second_cycle_can_choose_completion(self):
+  self.rng.random.return_value=0
+  p=watch_plan({'progress':20},True,self.rng,pass_index=2)
+  self.assertIsNone(p['seconds']);self.assertTrue(p['complete_intent']);self.assertEqual(p['pass_index'],2)
+ def test_unknown_related_progress_does_not_invent_a_duration(self):
+  p=watch_plan({},True,self.rng);self.assertEqual(p['basis'],'unavailable');self.assertIsNone(p['seconds'])
+ def test_unrelated_still_has_short_random_budget_even_if_duration_known(self):
+  self.rng.random.return_value=1
+  p=watch_plan({'playback':{'elapsed':0,'duration':600}},False,self.rng)
+  self.assertEqual(p['seconds'],5);self.assertEqual(p['basis'],'short');self.rng.random.assert_called_once()
+ def test_parser_requires_player_control_and_unambiguous_timing(self):
+  self.assertEqual(playback_timing([slider('00:03 / 00:10')]),{'elapsed':3,'duration':10})
+  self.assertIsNone(playback_timing([slider('30%')]))
+  self.assertIsNone(playback_timing([slider('00:03 / 00:10'),slider('00:03 / 00:20')]))
+  self.assertIsNone(playback_timing([ET.Element('XCUIElementTypeStaticText',visible='true',label='Video playback 00:03 / 00:10')]))
+ def test_real_progress_other_node_supported_without_caption_false_positives(self):
+  self.assertEqual(playback_progress([ET.Element('XCUIElementTypeOther',visible='true',name='Video progress: 62 percent')]),62)
+  self.assertIsNone(playback_progress([ET.Element('XCUIElementTypeStaticText',visible='true',label='Video progress: 62 percent')]))
+ def test_elapsed_duration_can_supply_progress(self):self.assertEqual(observed_progress({'playback':{'elapsed':9,'duration':10}}),90)
+ def test_small_jitter_ignored_but_wrap_between_samples_is_detected(self):
+  self.assertFalse(playback_finished(50,49));self.assertTrue(playback_finished(80,40));self.assertTrue(playback_finished(90,4))
 
-class ProgressWatching(unittest.TestCase):
- def test_real_instagram_progress_other_node_is_supported(self):
-  from watch_policy import playback_progress
-  node=ET.Element('XCUIElementTypeOther',visible='true',name='Video progress: 62 percent',label='Video progress: 62 percent')
-  self.assertEqual(playback_progress([node]),62)
-  for bad in (ET.Element('XCUIElementTypeStaticText',visible='true',label='Video progress: 62 percent'),ET.Element('XCUIElementTypeOther',visible='true',name='62 percent of likes')):
-   self.assertIsNone(playback_progress([bad]))
- def scenario(self,sequence):
-  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
-  self.now=100.;self.events=[]
-  r=Runner({**CFG,'runtime_dir':self.tmp.name},notify=self.events.append);r.rng=Mock();r.rng.uniform.return_value=25
-  def wait(seconds):self.now+=seconds
+class Watching(unittest.TestCase):
+ def scenario(self,sequence,replay=False):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.now=100.;self.events=[]
+  r=Runner({**CFG,'runtime_dir':self.tmp.name},notify=self.events.append);r.rng=Mock();r.rng.random.return_value=0;r.rng.random.side_effect=None if replay else [0,1];r.rng.uniform.return_value=4
+  r.wait=Mock(side_effect=lambda seconds:setattr(self,'now',self.now+seconds))
   def read():
-   self.now+=1
+   self.now+=.1
    return {'key':'clip','progress':next(sequence)}
-  r.wait=Mock(side_effect=wait);r.read_reel=Mock(side_effect=read)
+  r.read_reel=Mock(side_effect=read)
   return r,patch('runner.time.monotonic',side_effect=lambda:self.now)
- def test_wrap_from_end_to_start_finishes_without_rewatch(self):
-  r,clock=self.scenario(iter([10]))
+ def test_related_keeps_watching_beyond_25_seconds_while_progress_advances(self):
+  r,clock=self.scenario(iter(range(2,100)))
+  with clock:r.watch_video({'key':'clip','progress':1},True)
+  self.assertGreater(self.now-100,100);self.assertTrue(r.video_watch['done']);self.assertEqual(self.events[-1]['event'],'watch_complete')
+ def test_second_cycle_is_allowed_without_double_counting_end_samples(self):
+  r,clock=self.scenario(iter([98,99,10,50,98]),True)
+  with clock:r.watch_video({'key':'clip','progress':90},True)
+  self.assertEqual(r.read_reel.call_count,5);self.assertEqual(sum(e['event']=='watch_replay_complete' for e in self.events),1)
+ def test_wrap_completion_can_start_a_second_cycle_immediately(self):
+  r,clock=self.scenario(iter([10,50,99]),True)
   with clock:r.watch_video({'key':'clip','progress':85},True)
-  self.assertLess(self.now-100,4);self.assertEqual(self.events[-1]['event'],'watch_complete')
- def test_near_100_finishes_without_extra_wait(self):
+  self.assertEqual(r.read_reel.call_count,3);self.assertTrue(r.video_watch['done'])
+ def test_already_finished_video_does_not_restart_after_failed_swipe(self):
   r,clock=self.scenario(iter([]))
-  with clock:r.watch_video({'key':'clip','progress':99},True)
-  r.wait.assert_not_called();r.read_reel.assert_not_called()
- def test_small_backwards_jitter_is_not_treated_as_a_loop(self):
-  r,clock=self.scenario(iter([49,60,75,98]))
-  with clock:r.watch_video({'key':'clip','progress':50},True)
-  self.assertEqual(r.read_reel.call_count,4);self.assertEqual(self.events[-1]['event'],'watch_complete')
- def test_frozen_progress_has_a_bounded_stall_exit(self):
-  import itertools
+  with clock:
+   r.watch_video({'key':'clip','progress':99},True);r.watch_video({'key':'clip','progress':10},True)
+  r.read_reel.assert_not_called();r.wait.assert_not_called();self.assertEqual(r.rng.random.call_count,2)
+ def test_unknown_progress_has_a_missing_data_guard(self):
+  r,clock=self.scenario(itertools.repeat(None))
+  with clock:r.watch_video({'key':'clip'},True)
+  self.assertEqual(r.read_reel.call_count,2);self.assertEqual(self.events[-1]['event'],'watch_progress_unavailable')
+ def test_frozen_progress_is_a_stall_guard_not_a_healthy_video_cap(self):
   r,clock=self.scenario(itertools.repeat(50))
   with clock:r.watch_video({'key':'clip','progress':50},True)
-  self.assertLessEqual(self.now-100,12);self.assertEqual(self.events[-1]['event'],'watch_stalled')
- def test_losing_progress_does_not_reset_wait_budget(self):
-  r,clock=self.scenario(iter([None]))
-  with clock:r.watch_video({'key':'clip','progress':50,'observed_at':100},True)
-  self.assertLessEqual(self.now-100,10)
+  self.assertGreaterEqual(self.now-100,30);self.assertLess(self.now-100,33);self.assertEqual(self.events[-1]['event'],'watch_stalled')
+ def test_read_failure_routes_to_connection_recovery_instead_of_waiting_forever(self):
+  r,clock=self.scenario(iter([]));r.read_reel.side_effect=WatchBudgetExpired()
+  with clock,self.assertRaises(TransportLost):r.watch_video({'key':'clip','progress':50},True)
+  self.assertIsNone(r.watch_read_deadline)
+ def test_manual_stop_remains_effective_during_long_related_watch(self):
+  from runner import Halt
+  r,clock=self.scenario(itertools.repeat(50));r.stop.set();r.wait=Runner.wait.__get__(r,Runner)
+  with clock,self.assertRaises(Halt):r.watch_video({'key':'clip','progress':50},True)
+ def test_short_watch_counts_prior_reads_and_does_not_poll_completion(self):
+  r,clock=self.scenario(iter([]));r.rng.random.side_effect=None;r.rng.random.return_value=1
+  with clock:r.watch_video({'key':'clip','observed_at':98,'progress':50},False)
+  r.wait.assert_called_once_with(2);r.read_reel.assert_not_called()
+ def test_relevant_first_view_can_exit_without_waiting_for_completion(self):
+  r,clock=self.scenario(iter([]));r.rng.random.side_effect=[.9]
+  with clock:r.watch_video({'key':'clip','progress':20},True)
+  r.read_reel.assert_not_called();r.wait.assert_called_once_with(4);self.assertTrue(r.video_watch['done'])
+ def test_brief_second_view_does_not_wait_for_second_completion(self):
+  r,clock=self.scenario(iter([98]));r.rng.random.side_effect=[0,0,.9]
+  with clock:r.watch_video({'key':'clip','progress':90},True)
+  self.assertEqual(r.read_reel.call_count,1);self.assertEqual(self.events[-1]['event'],'watch_replay_brief')
+  self.assertTrue(r.video_watch['done']);r.rng.uniform.assert_called_once_with(1,4)
+ def test_io_read_still_has_a_request_timeout_without_viewing_cap(self):
+  r,clock=self.scenario(iter([]));r.path='/session/test';r.http=Mock(return_value={});r.watch_read_deadline=108
+  with clock:r.command('GET','/source')
+  self.assertEqual(r.http.call_args.kwargs['timeout'],8)
 
-class ProgressReadBudget(unittest.TestCase):
- def test_progress_http_read_cannot_outlive_watch_budget(self):
-  with tempfile.TemporaryDirectory() as folder:
-   r=Runner({**CFG,'runtime_dir':folder},notify=lambda _:None);r.path='/session/test';r.http=Mock(return_value={});r.watch_read_deadline=103
-   with patch('runner.time.monotonic',return_value=100):r.command('GET','/source')
-   self.assertEqual(r.http.call_args.kwargs['timeout'],3)
- def test_expired_progress_read_is_not_treated_as_a_write_failure(self):
-  from runner import WatchBudgetExpired
-  with tempfile.TemporaryDirectory() as folder:
-   r=Runner({**CFG,'runtime_dir':folder},notify=lambda _:None);r.path='/session/test';r.http=Mock();r.watch_read_deadline=99
-   with patch('runner.time.monotonic',return_value=100),self.assertRaises(WatchBudgetExpired):r.command('GET','/source')
-   r.http.assert_not_called()
+class Probabilities(unittest.TestCase):
+ def plan(self,related,value,second=False):
+  rng=Mock();rng.random.return_value=value;rng.uniform.side_effect=lambda a,b:a
+  return watch_plan({'progress':20},related,rng,pass_index=2 if second else 1)
+ def test_relevant_can_choose_early_exit(self):self.assertFalse(self.plan(True,.9)['complete_intent'])
+ def test_irrelevant_can_occasionally_choose_completion(self):self.assertTrue(self.plan(False,.05)['complete_intent'])
+ def test_relevance_increases_first_pass_completion_tendency(self):
+  self.assertTrue(self.plan(True,.5)['complete_intent']);self.assertFalse(self.plan(False,.5)['complete_intent'])
+ def test_second_viewing_is_more_likely_to_exit_early_for_both_categories(self):
+  self.assertTrue(self.plan(True,.5)['complete_intent']);self.assertFalse(self.plan(True,.5,True)['complete_intent'])
+  self.assertTrue(self.plan(False,.05)['complete_intent']);self.assertFalse(self.plan(False,.05,True)['complete_intent'])
+ def test_second_brief_viewing_uses_a_shorter_range(self):
+  self.assertEqual(self.plan(True,.9)['seconds'],2);self.assertEqual(self.plan(True,.9,True)['seconds'],1)

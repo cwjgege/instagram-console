@@ -21,12 +21,12 @@ class WatchRelevance(unittest.TestCase):
   self.assertTrue(watch_related(post('人工智能视频制作分享'),['人工智能'],[],[]))
   self.assertFalse(watch_related({'key':None,'caption':'AI video'},['AI video'],[],[]))
  def test_unrelated_known_long_duration_still_uses_short_random_wait(self):
-  rng=Mock();rng.uniform.return_value=4
+  rng=Mock();rng.uniform.return_value=4;rng.random.return_value=1
   plan=watch_plan({'playback':{'elapsed':0,'duration':60},'progress':1},False,rng)
-  self.assertEqual(plan['basis'],'short');self.assertEqual(plan['seconds'],4);rng.uniform.assert_called_once_with(2,5)
+  self.assertEqual(plan['basis'],'short');self.assertEqual(plan['seconds'],4);rng.uniform.assert_called_once_with(1.5,5)
  def test_unrelated_progress_never_starts_completion_polling(self):
   with tempfile.TemporaryDirectory() as directory:
-   r=Runner({**CFG,'runtime_dir':directory},notify=lambda _:None);r.rng=Mock();r.rng.uniform.return_value=3;r.wait=Mock();r.read_reel=Mock()
+   r=Runner({**CFG,'runtime_dir':directory},notify=lambda _:None);r.rng=Mock();r.rng.uniform.return_value=3;r.rng.random.return_value=1;r.wait=Mock();r.read_reel=Mock()
    with patch('runner.time.monotonic',return_value=100):r.watch_video({'key':'clip','progress':50},False)
    r.wait.assert_called_once_with(3);r.read_reel.assert_not_called()
  def test_viewing_match_does_not_expand_social_action_eligibility(self):

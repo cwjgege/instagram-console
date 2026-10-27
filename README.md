@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.20**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.21**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.20 关键词观看测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.20/Instagram-Console-1.2.20-AppleSilicon.dmg)
+[下载 v1.2.21 概率观看策略测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.21/Instagram-Console-1.2.21-AppleSilicon.dmg)
 
-[查看 v1.2.20 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.20)
+[查看 v1.2.21 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.21)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -301,3 +301,14 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 观看相关性同时参考搜索关键词和内容匹配词，基于当前视频可读取的文案/标签做本地文字匹配。支持大小写、标点、CamelCase 标签及有限词序/短语变化；排除词优先。文字缺失或无法确认的视频按短看处理，不进行视觉语义猜测。连续快速翻页遇到相关内容时，会停止连滑并重新安排观看。
 
 相关内容使用进度监测与较长预算；不相关内容始终随机安排 2～5 秒短看，即使可以读到总时长或进度也不等待完播。观看预算包含已有页面读取耗时。此观看判断不扩展点赞、收藏或评论的触发条件。
+
+
+## 1.2.21 关键词影响观看概率
+
+相关性仅影响观看倾向：相关视频也可能提前退出，无关视频偶尔也会看到结束附近。首次选择按进度观看的策略概率为相关 70%、无关 10%；首次提前退出时随机安排相关 2～8 秒、无关 1.5～5 秒，并计入已有页面读取耗时。
+
+首次看到结束附近后，相关内容以 25%、无关内容以 3% 的概率尝试回看。第二遍再独立选择是否看到结束附近，相关为 25%、无关为 3%，因此比第一遍更容易提前退出；第二遍短看分别为 1～4 秒、1～3 秒。最多安排两遍，连续末尾样本不会重复计算一遍。以上是策略选择概率，并非实测完播率；短片和控制延迟可能让短看也实际播完。
+
+选择按进度观看时没有单条固定秒数上限。保留异常保护：读取请求超时进入连接恢复，连续缺少进度数据时跳过，进度持续约 30 秒不变时停止等待。手动停止和整轮任务时长仍有效。相关性依据可读取文案/标签的本地文字近似匹配，不扩展点赞、收藏或评论触发条件。搜索结果保留原有独立观看策略。
+
+本版完成自动验证和安装包自检；按用户要求未进行新的手机实测。

@@ -34,18 +34,31 @@ def playback_progress(nodes):
 
 def playback_finished(previous,current):
     if current is None:return False
-    return current>=97 or (previous is not None and previous>=65 and current<=35 and previous-current>=40)
+    return current>=97 or (previous is not None and previous-current>=5)
 
-def watch_plan(post,related,rng):
-    if not related:return {'seconds':rng.uniform(2,5),'basis':'short','duration':None}
+def observed_progress(post):
+    progress=post.get('progress')
+    if type(progress) in (int,float) and math.isfinite(progress) and 0<=progress<=100:return progress
     timing=post.get('playback')
     if isinstance(timing,dict):
         elapsed,total=timing.get('elapsed'),timing.get('duration')
-        if (type(elapsed) in (int,float) and type(total) in (int,float)
-            and math.isfinite(elapsed) and math.isfinite(total) and 0<=elapsed<=total and .25<=total<=3600):
-            # Aim near one viewing, allow a small variation, and sample long videos.
-            return {'seconds':max(0,min(25,total*rng.uniform(.85,1.15))-elapsed),'basis':'duration','duration':total}
-    progress=post.get('progress')
-    if type(progress) in (int,float) and math.isfinite(progress) and 0<=progress<=100:
-        return {'seconds':rng.uniform(18,25) if related else rng.uniform(2,5),'basis':'progress','duration':None}
-    return {'seconds':rng.uniform(4,10) if related else rng.uniform(2,5),'basis':'fallback','duration':None}
+        if type(elapsed) in (int,float) and type(total) in (int,float) and math.isfinite(elapsed) and math.isfinite(total) and 0<=elapsed<=total and total>0:
+            return elapsed/total*100
+    return None
+
+def watch_plan(post,related,rng,pass_index=1):
+    probability=(.70 if related else .10) if pass_index==1 else (.25 if related else .03)
+    complete=rng.random()<probability
+    timing=post.get('playback')
+    progress=observed_progress(post)
+    duration=timing.get('duration') if isinstance(timing,dict) and progress is not None else None
+    if complete:
+        basis='duration' if duration is not None else 'progress' if progress is not None else 'unavailable'
+        seconds=None
+    else:
+        bounds=((2,8) if related else (1.5,5)) if pass_index==1 else ((1,4) if related else (1,3))
+        seconds=rng.uniform(*bounds);basis='short'
+    return {'seconds':seconds,'basis':basis,'duration':duration,'pass_index':pass_index,
+            'complete_probability':probability,'complete_intent':complete}
+
+def replay_probability(related):return .25 if related else .03
