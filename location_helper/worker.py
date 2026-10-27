@@ -117,7 +117,9 @@ async def main():
     if len(sys.argv)==3 and sys.argv[1]=='--run-controller':
         from controller import serve as controller_serve
         from pathlib import Path
-        await controller_serve(json.loads(Path(sys.argv[2]).read_text()),emit);return
+        try:await controller_serve(json.loads(Path(sys.argv[2]).read_text()),emit)
+        except Exception as exc:emit('error',error=type(exc).__name__+': '+str(exc)[:1200]);raise SystemExit(1)
+        return
     if len(sys.argv)==3 and sys.argv[1] in ('--prepare-wireless','--check-wireless'):
         try:await asyncio.wait_for(wireless_command(sys.argv[1],sys.argv[2]),40)
         except Exception as exc:emit('error',error=type(exc).__name__+': '+str(exc)[:600]);raise SystemExit(1)

@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.22**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.23**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.22 设备管理与无线核验修复测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.22/Instagram-Console-1.2.22-AppleSilicon.dmg)
+[下载 v1.2.23 无线启动修复与版本显示测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.23/Instagram-Console-1.2.23-AppleSilicon.dmg)
 
-[查看 v1.2.22 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.22)
+[查看 v1.2.23 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.23)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -324,3 +324,13 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 修复已配对无线手机的控件指纹变化后，普通配对核验通道不可用就直接退出的问题：只有该通道不可用且开发连接为 localNetwork 时才尝试已有独立无线通道；仍核验设备编号、有效本机签名和 WDA 身份后更新绑定。明确核验到其他设备或组件不一致时不放行。核验失败保留原绑定，并记录更具体的底层原因。
 
 456 项自动检查通过，真实 Tk 窗口使用模拟设备完成排序、选择保留、名称同步、保存、删除及重新添加检查；原生系统废纸篓使用一次性测试文件验证。本轮未做手机连接、浏览或定位实测；无线故障修复仍需在对应设备重试确认。
+
+## 1.2.23 无线启动方式与界面版本号
+
+针对备用无线通道日志中的 XCTest 握手断开（ConnectionTerminatedError），取消该通道使用 pymobiledevice3 自定义 XCUITest 编排启动 WDA 的方式。优先通过已配对的独立用户态隧道读取原端口的 WDA，并核验设备编号、本机签名组件和指纹；已运行的 WDA 不再被重复启动。
+
+确实没有可用 WDA 时，独立通道使用本机 Xcode 的 `test-without-building` 和已验证签名产物启动所选设备，保持原产物的 WDA/MJPEG 端口，不重新编译、安装或申请证书。缺失产物给出明确提示，设备或组件不符仍阻断；子进程随通道释放。连接失效仍需重新连接，不声称永不断线。
+
+备用通道异常以结构化错误输出，界面和 connection-diagnostic.json 可看到更具体的启动错误，而不只提示“检查配对或解锁”。主工作区内容区和配置、连接、定位窗口固定区域显示版本号，相关标题也保留版本号。
+
+465 项自动检查通过，包含真实本机 HTTP/TCP 模拟服务的身份核验及转发、端口释放、已有 WDA 不启动测试、缺失 WDA 使用标准 Xcode、错误签名阻断及子进程清理。模拟设备窗口验证版本号、重命名、删除及 USB 排序。本轮未做手机连接或浏览实测，新启动流程仍需在出现故障的手机验证。

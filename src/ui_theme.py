@@ -37,6 +37,16 @@ def apply(root):
     style.configure('Horizontal.TProgressbar',background=BLUE,troughcolor=BG,borderwidth=0,thickness=3)
     return style
 
+def version_label(parent,workspace=False):
+    from app_paths import APP_VERSION
+    label=ttk.Label(parent,text='Instagram 控制台 · v'+APP_VERSION,style='Workspace.TLabel' if workspace else 'Muted.TLabel')
+    label.pack(anchor='w',pady=(0,6));return label
+
+def version_title(text):
+    from app_paths import APP_VERSION
+    return text+' · v'+APP_VERSION
+
+
 def scroll_form(parent,padding=16):
     """A form that can shrink while keeping its own wheel events scoped."""
     area=ttk.Frame(parent);area.pack(fill='both',expand=True)

@@ -41,7 +41,7 @@ class Panel:
         self.closing=False
         self.comment_rules=json.loads(json.dumps(self.cfg['comment_rules']))
         self.selected_rule=None
-        ui.apply(root);root.title('Instagram 控制台')
+        ui.apply(root);root.title(ui.version_title('Instagram 控制台'))
         root.geometry(f'940x{min(820,root.winfo_screenheight()-100)}');root.minsize(820,580)
         outer=ttk.Frame(root,padding=20);outer.pack(fill='both',expand=True)
         self.title_name=tk.StringVar(value=self.cfg.get('device_name') or '设备控制台')
@@ -74,6 +74,7 @@ class Panel:
         footer=ttk.Frame(outer);footer.pack(side='bottom',fill='x',pady=(12,0))
         self.edit_hint=tk.StringVar(value='仅此设备   ·   ⌘ Return 开始   ·   Esc 停止')
         ttk.Label(footer,textvariable=self.edit_hint,style='Muted.TLabel',font=('PingFang SC',10)).pack(side='left')
+        ui.version_label(footer)
         self.global_save_button=ttk.Button(footer,text='保存全部设置',command=self.save_settings)
         self.global_save_button.pack(side='right')
         self.tabs=ttk.Notebook(outer);self.tabs.enable_traversal(); self.tabs.pack(fill='both',expand=True)

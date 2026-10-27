@@ -14,11 +14,12 @@ import ui_theme as ui
 class DeviceWindow:
     def __init__(self,panel):
         self.panel=panel;self.events=queue.Queue();self.busy=False;self.devices=[];self.team_map={};self.awaiting_wireless=None;self.wireless_stop=threading.Event();self.wireless_running=False
-        self.window=tk.Toplevel(panel.root);self.window.title('设备配置与签名')
+        self.window=tk.Toplevel(panel.root);self.window.title(ui.version_title('设备配置与签名'))
         self.window.geometry(f'820x{min(800,max(560,self.window.winfo_screenheight()-100))}')
         self.window.minsize(620,540)
         # Reserve results and actions before allocating the scrollable form.
         footer=ttk.Frame(self.window,padding=(18,12));footer.pack(side='bottom',fill='x')
+        ui.version_label(footer)
         self.status=tk.StringVar(value='准备就绪。')
         self.status_label=ttk.Label(footer,textvariable=self.status,wraplength=760)
         self.status_label.pack(fill='x',pady=(0,8))

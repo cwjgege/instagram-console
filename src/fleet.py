@@ -26,6 +26,7 @@ class Fleet:
         header=ttk.Frame(body,style='Workspace.TFrame');header.pack(fill='x',pady=(0,18))
         title=ttk.Frame(header,style='Workspace.TFrame');title.pack(side='left')
         ttk.Label(title,text='设备工作区',font=('PingFang SC',22,'bold'),background=ui.BG,foreground=ui.INK).pack(anchor='w')
+        ui.version_label(title,workspace=True)
         self.summary=tk.StringVar(value='正在检测设备连接…')
         ttk.Label(title,textvariable=self.summary,style='Workspace.TLabel').pack(anchor='w',pady=(5,0))
         self.add_button=ttk.Button(header,text='添加设备',command=self.open_devices);self.add_button.pack(side='right',anchor='n')
@@ -218,7 +219,7 @@ class Fleet:
             panel=self.panels.get(udid)
             if panel:
                 for key in ('device_name','device_alias','device_original_name'):panel.cfg[key]=cfg[key]
-                panel.title_name.set(name);panel.root.title(name+' · 配置与日志')
+                panel.title_name.set(name);panel.root.title(ui.version_title(name+' · 配置与日志'))
                 if getattr(panel,'task_alerts',None):panel.task_alerts.device=name
             window=self.location_windows.get(udid)
             if window:window.update_identity(cfg)
@@ -313,7 +314,7 @@ class Fleet:
             cfg=next(c for c in self.store.profiles() if c['device_udid']==udid)
             if cfg.get('_load_error'):raise RuntimeError(cfg['_load_error'])
             window=tk.Toplevel(self.root);p=Panel(window,config=cfg,config_path=self.store.path(udid));p.pinned_device=True
-            window.title(display_name(cfg)+' · 配置与日志');window.protocol('WM_DELETE_WINDOW',window.withdraw)
+            window.title(ui.version_title(display_name(cfg)+' · 配置与日志'));window.protocol('WM_DELETE_WINDOW',window.withdraw)
             window.bind('<Command-q>',lambda _:self.close());self.root.createcommand('tk::mac::Quit',self.close)
             self.panels[udid]=p;window.withdraw()
         p=self.panels[udid]

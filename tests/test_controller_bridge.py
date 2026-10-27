@@ -71,3 +71,53 @@ class IdentityUnavailableFallback(unittest.TestCase):
   import connections as cn
   from runner import Halt
   with patch.object(cn,'_ensure_wifi',side_effect=self.failure(cn.IdentityProofUnavailable('unavailable'))),patch.object(cn,'stop_device'),patch.object(bridge,'ensure',side_effect=Halt('stop')),self.assertRaises(Halt):cn.ensure_wifi(UDID,setting_override={'mode':'wifi'})
+
+class StandardStartup(unittest.IsolatedAsyncioTestCase):
+ def cfg(self):return dict(udid=UDID,bundle=BUNDLE,local_wda=19001,local_mjpeg=19002,remote_wda=8100,remote_mjpeg=19002)
+ async def test_existing_signed_wda_is_reused_without_any_xctest_launch(self):
+  from unittest.mock import AsyncMock
+  proof=({'build':{'productBundleIdentifier':BUNDLE}},{'uuid':'new'})
+  with patch.object(controller,'identity',new=AsyncMock(return_value=proof)),patch.object(controller,'launch_standard',new=AsyncMock()) as launch:
+   self.assertEqual(await controller.ready(object(),self.cfg(),lambda *a,**k:None),(*proof,None))
+   launch.assert_not_called()
+ async def test_absent_existing_wda_uses_standard_xcode_and_returns_owned_child(self):
+  from unittest.mock import AsyncMock
+  child=Mock(returncode=None);proof=({'ready':True},{'uuid':'new'})
+  class TunnelConnectError(Exception):pass
+  with patch.object(controller,'identity',new=AsyncMock(side_effect=[TunnelConnectError('port closed'),proof])),patch.object(controller,'launch_standard',new=AsyncMock(return_value=child)) as launch:
+   self.assertEqual(await controller.ready(object(),self.cfg(),lambda *a,**k:None),(*proof,child));launch.assert_awaited_once()
+ async def test_wrong_signed_bundle_never_launches_or_returns_proof(self):
+  from unittest.mock import AsyncMock
+  with patch.object(controller,'identity',new=AsyncMock(side_effect=controller.IdentityMismatch('another bundle'))),patch.object(controller,'launch_standard',new=AsyncMock()) as launch,self.assertRaises(controller.IdentityMismatch):await controller.ready(object(),self.cfg(),lambda *a,**k:None)
+  launch.assert_not_called()
+ async def test_failed_xcode_child_is_reaped_without_masking_startup_error(self):
+  from unittest.mock import AsyncMock
+  child=Mock(returncode=65);child.wait=AsyncMock(return_value=65)
+  with patch.object(controller,'identity',new=AsyncMock(side_effect=OSError('no WDA'))),patch.object(controller,'launch_standard',new=AsyncMock(return_value=child)),self.assertRaisesRegex(RuntimeError,'65'):await controller.ready(object(),self.cfg(),lambda *a,**k:None)
+  child.wait.assert_awaited_once()
+ async def test_launch_uses_test_without_building_for_only_selected_device(self):
+  import tempfile
+  from unittest.mock import AsyncMock
+  with tempfile.TemporaryDirectory() as folder:
+   root=Path(folder);executable=root/'Developer/usr/bin/xcodebuild';executable.parent.mkdir(parents=True);executable.touch();spec=root/'wireless.xctestrun';spec.touch()
+   cfg={**self.cfg(),'xcodebuild':str(executable),'xctestrun':str(spec)}
+   with patch.object(controller.asyncio,'create_subprocess_exec',new=AsyncMock()) as start:
+    await controller.launch_standard(cfg)
+   args=start.call_args.args;self.assertIn('test-without-building',args);self.assertIn('id='+UDID,args);self.assertNotIn('-allowProvisioningUpdates',args)
+ async def test_missing_build_does_not_launch_arbitrary_process(self):
+  from unittest.mock import AsyncMock
+  with patch.object(controller.asyncio,'create_subprocess_exec',new=AsyncMock()) as start,self.assertRaisesRegex(RuntimeError,'本机签名'):await controller.launch_standard(self.cfg())
+  start.assert_not_called()
+
+class StartupDiagnostics(unittest.TestCase):
+ def test_legacy_runner_disconnection_is_reported_instead_of_generic_pairing_hint(self):
+  import tempfile
+  with tempfile.TemporaryDirectory() as folder:
+   path=Path(folder)/'controller-wireless.log';path.write_text('warning\npymobiledevice3.exceptions.ConnectionTerminatedError: The test runner disconnected\n[PYI:ERROR] Failed to execute script\n')
+   error=bridge.startup_failure(path,1)
+  self.assertIn('ConnectionTerminatedError',str(error));self.assertIn('不代表开发者模式未开启',str(error))
+ def test_structured_helper_error_is_included_in_connection_failure(self):
+  import tempfile
+  with tempfile.TemporaryDirectory() as folder:
+   path=Path(folder)/'controller-wireless.log';path.write_text(json.dumps({'event':'error','error':'RuntimeError: 标准 Xcode 启动提前结束，退出码 65'}))
+   self.assertIn('退出码 65',str(bridge.startup_failure(path,1)))

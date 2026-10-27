@@ -319,6 +319,20 @@ def prepare_wireless_xctestrun(derived,runtime,bundle,port,mjpeg):
             path.write_bytes(plistlib.dumps(value));return path
     raise RuntimeError('本机 XCTest 产物与当前签名组件不匹配或文件缺失。请通过 USB 的“连接与签名”恢复该手机组件，不会启动其他签名组件。')
 
+def wireless_ports(derived):
+    runs=sorted((derived/'Build/Products').glob('*.xctestrun'),key=lambda f:f.stat().st_mtime,reverse=True)
+    env={}
+    def read_env(value):
+        if isinstance(value,dict):
+            if 'TestBundlePath' in value:env.update(value.get('EnvironmentVariables',{}))
+            for child in value.values():read_env(child)
+        elif isinstance(value,list):
+            for child in value:read_env(child)
+    if runs:read_env(plistlib.loads(runs[0].read_bytes()))
+    port=int(env.get('USE_PORT',8100));mjpeg=int(env.get('MJPEG_SERVER_PORT',9100))
+    if not 1<=port<=65535 or not 1<=mjpeg<=65535:raise RuntimeError('测试产物端口配置无效，请重新安装组件。')
+    return port,mjpeg
+
 def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
     from runner import Halt
     trace={'stage':'preflight','candidates':[]}
@@ -350,6 +364,7 @@ def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
             except Halt:
                 stop_device(udid);raise
             except Exception as fallback:
+                trace['fallback_error']=str(fallback)[:2000]
                 stop_device(udid);exc=RuntimeError(str(exc)+'；备用无线通道：'+str(fallback))
         # A diagnostic write failure must not replace the original connection error.
         try:path=record_connection_failure(udid,trace,exc)
@@ -382,17 +397,8 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
     if c.get('transportType')=='localNetwork' and major>=17:
         import controller_bridge
         if controller_bridge.preferred(udid):return controller_bridge.ensure(udid,setting,notify,stop)
-    derived=derived_path(udid);runs=sorted((derived/'Build/Products').glob('*.xctestrun'),key=lambda f:f.stat().st_mtime,reverse=True)
-    env={}
-    def read_env(value):
-        if isinstance(value,dict):
-            if 'TestBundlePath' in value:env.update(value.get('EnvironmentVariables',{}))
-            for child in value.values():read_env(child)
-        elif isinstance(value,list):
-            for child in value:read_env(child)
-    if runs:read_env(plistlib.loads(runs[0].read_bytes()))
-    port=int(env.get('USE_PORT',8100));mjpeg=int(env.get('MJPEG_SERVER_PORT',9100))
-    if not 1<=port<=65535 or not 1<=mjpeg<=65535:raise RuntimeError('测试产物端口配置无效，请重新安装组件。')
+    derived=derived_path(udid)
+    port,mjpeg=wireless_ports(derived)
     ip=c.get('tunnelIPAddress') or ''
     url=(f'http://[{ip}]:{port}' if ':' in ip else f'http://{ip}:{port}') if ip else None
     trace.update(stage='existing_endpoint',candidates=[url] if url else [],wda_port=port,mjpeg_port=mjpeg)

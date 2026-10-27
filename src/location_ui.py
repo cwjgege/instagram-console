@@ -12,6 +12,7 @@ class LocationWindow:
         w.title('固定定位 · '+cfg.get('device_name','iPhone'));w.geometry(f'620x{min(720,w.winfo_screenheight()-90)}');w.minsize(520,500)
         w.protocol('WM_DELETE_WINDOW',self.close)
         footer=ttk.Frame(w,padding=16);footer.pack(side='bottom',fill='x')
+        ui.version_label(footer)
         buttons=ttk.Frame(footer);buttons.pack(side='bottom',fill='x',pady=(10,0))
         ttk.Button(buttons,text='关闭',command=self.close).pack(side='right')
         w.bind('<Command-f>',lambda _:self.open_map())
@@ -50,7 +51,7 @@ class LocationWindow:
         self.error='';self.was_busy=False;self.poll()
     def update_identity(self,cfg):
         name=cfg.get('device_alias') or cfg.get('device_name','iPhone')
-        self.window.title('固定定位 · '+name)
+        self.window.title(ui.version_title('固定定位 · '+name))
         self.identity_text.set(name+'  ·  iOS '+cfg.get('device_ios','未知')+'  ·  编号末尾 '+self.udid[-8:])
 
     def open_map(self):

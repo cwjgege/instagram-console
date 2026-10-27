@@ -16,6 +16,7 @@ class ConnectionWindow:
         fleet.connection_windows.append(self)
         self.window=tk.Toplevel(fleet.root);self.window.title(f'连接方式 · {APP_VERSION}');self.window.geometry('780x700');self.window.minsize(620,540)
         footer=ttk.Frame(self.window,padding=18);footer.pack(side='bottom',fill='x')
+        ui.version_label(footer)
         self.status=tk.StringVar(value='发现局域网中已运行的 WDA，或导入原 Mac 导出的连接文件。')
         self.status_label=ttk.Label(footer,textvariable=self.status,wraplength=720);self.status_label.pack(fill='x',pady=(0,10))
         self.button=ttk.Button(footer,text='验证并保存连接方式',command=self.save,style='Primary.TButton');self.button.pack(side='left')
