@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.18**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.19**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.18 无线恢复与异常通知测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.18/Instagram-Console-1.2.18-AppleSilicon.dmg)
+[下载 v1.2.19 播放进度测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.19/Instagram-Console-1.2.19-AppleSilicon.dmg)
 
-[查看 v1.2.18 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.18)
+[查看 v1.2.19 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.19)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -285,3 +285,12 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 修正已配对 usbmux 连接暂停读取导致的指纹核验超时。Xcode 无线测试通道明确拒绝 XCTestDriverInterface 时，使用独立的 pymobiledevice3 用户态通道启动原有签名组件，并转发至本机环回端口。逐台核验实际 UDID、签名组件与当前 WDA 指纹；不使用其他手机或共享系统隧道。实机验证结果另见发布说明。
 
 发布前在 iPhone 11 / iOS 26.6 拔线保留 VPN 环境下连续运行 532.4 秒：16 轮浏览、2 轮完整搜索、2 次收藏流程，无异常退出或重连；捕获的收藏弹层自动关闭后继续浏览。400 项自动检查通过。
+
+
+## 1.2.19 播放进度与观看预算
+
+普通视频浏览优先读取真实的 `Video progress: N percent` 播放进度。读到至少 97%，或同一视频从末尾明显回到开头时，结束观看等待；进度持续不变约 8 秒时停止等待，避免暂停或缓冲造成长时间重复停留。实际检测延迟受手机与控制连接耗时影响。
+
+相关视频的观看预算为 18～25 秒，上限内监测播放结束；不相关内容保留 2～5 秒快速浏览。若界面提供明确的当前/总时长，则按约一遍安排观看，长片最多安排 25 秒。若没有可靠进度或时长，相关内容只安排 4～10 秒，普通内容 2～5 秒。取消额外 10～25 秒长停留。
+
+页面读取和翻页确认耗时计入观看预算，同一视频未切换不会重新生成一轮停留时间。预算约束纯观看及其进度读取；配置的互动、模型分析或连接恢复另计。搜索结果仍遵循搜索页已有的观看设置。

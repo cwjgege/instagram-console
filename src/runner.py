@@ -25,6 +25,7 @@ import diagnostics
 from page_state import (PageBlocked, classify, visible_nodes, screen_height, search_input_node, search_layout, search_back_name, profile_back_name, collection_sheet_nodes, collection_sheet_close)
 from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
 from session_context import current as session_context
+from watch_policy import playback_timing,playback_progress,playback_finished,watch_plan
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
 class ManualResume(BaseException):
@@ -75,6 +76,9 @@ class Halt(Exception):
 
 class NavigationLost(RuntimeError):
     """Recoverable navigation loss; never used for an unconfirmed write result."""
+    pass
+
+class WatchBudgetExpired(RuntimeError):
     pass
 
 class SearchTimedOut(NavigationLost):
@@ -155,6 +159,7 @@ class Runner:
         self.in_interaction = False
         self.interaction_deadline = None
         self.search_deadline = None
+        self.video_watch = None
         self.refresh_required = False
         self.last_tree = None
         self.page_state = None
@@ -262,14 +267,19 @@ class Runner:
         readonly=method=='GET' or suffix=='/elements' or (
             suffix=='/execute/sync' and (data or {}).get('script')=='mobile: activeAppInfo')
         def send():
-            deadlines=[d for d in (getattr(self,'interaction_deadline',None),getattr(self,'search_deadline',None)) if d is not None]
+            deadlines=[d for d in (getattr(self,'interaction_deadline',None),getattr(self,'search_deadline',None),getattr(self,'watch_read_deadline',None) if readonly else None) if d is not None]
             deadline=min(deadlines) if deadlines else None
             if deadline is None:return self.http(method,self.path+suffix,data)
             remaining=deadline-time.monotonic()
             if remaining<=0:
+                if getattr(self,'watch_read_deadline',None)==deadline:raise WatchBudgetExpired('本条观看预算已用完')
                 if getattr(self,'search_deadline',None)==deadline:raise SearchTimedOut('搜索已超时，暂停本轮搜索')
                 raise InteractionSkipped('收藏确认已超时，跳过本条，不重复发送收藏操作')
-            return self.http(method,self.path+suffix,data,timeout=min(35,remaining))
+            try:return self.http(method,self.path+suffix,data,timeout=min(35,remaining))
+            except Exception as exc:
+                if getattr(self,'watch_read_deadline',None)==deadline and transport_error(exc) and time.monotonic()>=deadline:
+                    raise WatchBudgetExpired('播放进度读取未在本条预算内完成') from exc
+                raise
         try:
             return send()
         except Exception as exc:
@@ -560,6 +570,7 @@ class Runner:
         raise NavigationLost('返回 Instagram 主页面的尝试已用完')
 
     def read_reel(self):
+        observed=time.monotonic()
         for attempt in range(3):
             tree = self.snapshot()
             state=self.observe(tree)
@@ -583,7 +594,57 @@ class Runner:
         caption = '\n'.join(dict.fromkeys(captions)).strip()
         # An absent caption is not enough evidence to identify a video or interact.
         key = hashlib.sha256((author+'\n'+caption).encode()).hexdigest()[:24] if author and caption else None
-        return {'author':author,'caption':caption,'key':key,'nodes':nodes}
+        if key and getattr(self,'_visible_video_key',None)!=key:
+            self._visible_video_key=key;self._visible_video_since=observed
+        return {'author':author,'caption':caption,'key':key,'nodes':nodes,
+                'observed_at':self._visible_video_since if key else observed,
+                'timing_at':observed,'playback':playback_timing(nodes),'progress':playback_progress(nodes)}
+
+    def watch_video(self,post,related):
+        now=time.monotonic();key=post.get('key')
+        current=getattr(self,'video_watch',None)
+        if not key or not current or current['key']!=key:
+            plan=watch_plan(post if key else {},related,self.rng)
+            anchor=post.get('timing_at' if plan['basis']=='duration' else 'observed_at',now)
+            if not isinstance(anchor,(int,float)) or not 0<=now-anchor<=3600:anchor=now
+            current={**plan,'key':key,'deadline':anchor+plan['seconds'],'fallback_deadline':anchor+(10 if related else 5)}
+            self.video_watch=current
+        remaining=max(0,current['deadline']-now)
+        self.log('watch_timing',message={'duration':'按视频进度安排观看','progress':'观察播放进度，接近结束即翻页','fallback':'未读取到可靠进度，使用短停留上限'}[current['basis']],
+                 timing_source=current['basis'],duration=current['duration'],remaining_seconds=round(remaining,2))
+        progress=post.get('progress') if key else None;unchanged_since=now
+        if remaining<=0:return
+        if progress is None:
+            self.wait(remaining);return
+        while True:
+            if playback_finished(None,progress):
+                current['deadline']=time.monotonic()
+                self.log('watch_complete',message='视频播放已接近结束，准备翻页',progress=progress);return
+            remaining=current['deadline']-time.monotonic()
+            if remaining<=0:return
+            self.wait(min(1.5,remaining))
+            if time.monotonic()>=current['deadline']:return
+            self.watch_read_deadline=current['deadline']
+            try:fresh=self.read_reel()
+            except WatchBudgetExpired:
+                self.log('watch_budget_used',message='本条观看预算已用完，停止等待进度');return
+            finally:self.watch_read_deadline=None
+            if fresh.get('key')!=key:
+                raise InteractionSkipped('观看期间视频已变化，跳过旧视频互动')
+            following=fresh.get('progress');now=time.monotonic()
+            if following is None:
+                # Loss of timing must not grant another full dwell period.
+                current['deadline']=min(current['deadline'],current['fallback_deadline'])
+                self.log('watch_progress_unavailable',message='播放进度暂不可读，缩短本条剩余等待')
+                self.wait(max(0,current['deadline']-now));return
+            if playback_finished(progress,following):
+                current['deadline']=now
+                self.log('watch_complete',message='检测到播放结束或进度回到开头，准备翻页',progress=following);return
+            if following!=progress:unchanged_since=now
+            elif now-unchanged_since>=8:
+                current['deadline']=now
+                self.log('watch_stalled',message='播放进度持续不变，停止等待并准备翻页',progress=following);return
+            progress=following
 
     def recover_reels(self):
         """Navigate only with observed controls; abandon the previous post on recovery."""
@@ -1136,6 +1197,7 @@ class Runner:
 
     def swipe(self, direction):
         before=self.read_reel()
+        transition_started=time.monotonic()
         self.gesture(direction)
         self.swipes+=1
         self.position=max(0,self.position+(1 if direction=='up' else -1))
@@ -1154,6 +1216,8 @@ class Runner:
                 raise NavigationLost('连续三次滑动仍是同一视频，尝试恢复入口')
         else:
             self.unchanged_swipes=0
+            if after.get('key') and getattr(self,'_visible_video_key',None)==after['key']:
+                self._visible_video_since=min(self._visible_video_since,transition_started)
         self.log('page_checked',message='滑动后已确认仍在 Reels')
 
     def run(self):
@@ -1207,10 +1271,7 @@ class Runner:
                             self.refresh_required=True
                             raise NavigationLost('连续翻页后仍停留同一内容')
                         last_key=post['key']
-                        dwell=self.rng.uniform(12,30) if related else self.rng.uniform(3,10)
-                        if self.rng.random()<.12:
-                            dwell+=self.rng.uniform(10,25)
-                        self.wait(dwell)
+                        self.watch_video(post,related)
                         if skip_interaction:self.log('handoff_skip',message='人工接管后的当前视频跳过互动')
                         if not skip_interaction:self.consider_like(post,related)
                         self.check()

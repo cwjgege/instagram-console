@@ -46,7 +46,7 @@ class Variants(unittest.TestCase):
   self.r.snapshot=Mock(return_value=meta());self.r.mobile=Mock(return_value={'bundleId':'com.burbn.instagram'});self.r.read_reel=Mock(side_effect=[NavigationLost('not reels'),{'key':'new'}])
   self.r.recover_reels();self.r.click.assert_called_once_with('Back')
  def test_failed_search_is_cooled_down_before_retry(self):
-  clock=[0.0];counter=[0];self.r.seconds=120;self.r.cfg.update(device_udid='A'*20,max_swipes_per_run=20,enable_comments=False)
+  clock=[0.0];counter=[0];self.r.seconds=120;self.r.cfg.update(device_udid='A'*20,max_swipes_per_run=100,enable_comments=False)
   self.r.wait=lambda seconds:clock.__setitem__(0,clock[0]+seconds)
   self.r.connect=Mock();self.r.reels=Mock();self.r.recover_reels=Mock();self.r.return_from_search=Mock()
   def post():
