@@ -19,6 +19,7 @@ class InteractionContinuation(unittest.TestCase):
   state={'post':0,'clicked':False,'failed':False};clicks=[]
   name='like-button' if kind=='likes' else 'save-button';inactive='Like' if kind=='likes' else 'Save';active='Unlike' if kind=='likes' else 'Unsave'
   def read():
+   if state['post']==0 and state['clicked'] and not state['failed'] and failure=='collection_sheet':raise NavigationLost('persistent collection selector')
    if state['post']==0 and state['clicked'] and not state['failed'] and failure=='navigation':
     state['failed']=True;raise NavigationLost('temporary save sheet')
    if state['post']==0 and state['clicked'] and failure=='read_transport' and not state['failed']:raise TransportLost('read connection lost')
@@ -30,6 +31,15 @@ class InteractionContinuation(unittest.TestCase):
    if state['post']==0 and failure=='blocked':raise PageBlocked('account check')
   def swipe(direction):r.swipes+=1;state.update(post=state['post']+1,clicked=False)
   r.read_reel=read;r.click=click;r.swipe=swipe
+  if failure=='collection_sheet':
+   tree=ET.Element('root');modal=ET.SubElement(tree,'XCUIElementTypeOther',name='ig-partial-modal-sheet-view-controller-content',visible='true')
+   ET.SubElement(modal,'XCUIElementTypeStaticText',label='Save to collection',visible='true');ET.SubElement(modal,'XCUIElementTypeButton',name='close-button',label='Close',visible='true')
+   r.mobile=Mock(return_value={'bundleId':'com.burbn.instagram'});r.snapshot=Mock(return_value=tree)
+   def command(method,path,data):
+    if path=='/elements':return [{'ELEMENT':'collection-close'}]
+    if path=='/element/collection-close/click':state['failed']=True;return {}
+    raise AssertionError('Unexpected collection action')
+   r.command=Mock(side_effect=command)
   def reconnect():
    self.assertFalse(r.in_interaction);state['failed']=True
   r.recover_connection=Mock(side_effect=reconnect)
@@ -66,3 +76,9 @@ class InteractionContinuation(unittest.TestCase):
   r.read_reel=Mock(return_value=p);r.click=Mock(side_effect=ControlHTTPError('stale',404,'stale element reference'))
   with self.assertRaises(InteractionSkipped):r.toggle_on(p,'saves','save-button',{'save'})
   r.toggle_on(p,'saves','save-button',{'save'});r.click.assert_called_once()
+
+ def test_persistent_collection_selector_is_closed_and_skipped_without_extra_dwell(self):
+  r,status,clicks=self.scenario('saves','collection_sheet')
+  self.assertEqual(status,'complete');self.assertEqual([p for p,_ in clicks],[0,1]);self.assertEqual(r.counts['watched'],2)
+  self.assertEqual(r.daily['posts']['post0']['saves'],'pending');self.assertEqual(r.daily['posts']['post1']['saves'],'done')
+  self.assertEqual(sum(c.args[1]=='/element/collection-close/click' for c in r.command.call_args_list),1)

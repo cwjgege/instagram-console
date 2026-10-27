@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.16**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.17**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.16 自动核验指纹测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.16/Instagram-Console-1.2.16-AppleSilicon.dmg)
+[下载 v1.2.17 收藏弹层恢复测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.17/Instagram-Console-1.2.17-AppleSilicon.dmg)
 
-[查看 v1.2.16 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.16)
+[查看 v1.2.17 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.17)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -268,3 +268,9 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 本轮使用自动化与本地模拟 usbmux 路由的 HTTP 传输测试验证；截图中的新 Mac 未接入当前执行环境，未声称已在该 Mac 完成重装后恢复的实机验收。
 
 验证：373 项自动检查通过，覆盖同机自动刷新、其他手机占用缓存 IP、其他组件、签名失效、错误安装记录、取消、重复绑定、并发配置变更和定位读回的自动恢复；配对端口探针还使用本地 HTTP 服务验证实际请求与错误 UDID 拦截。
+
+## 1.2.17 收藏夹选择弹层关闭与跳过
+
+识别具有明确收藏标题的选择弹层，仅点击其中唯一、可见、启用的关闭/取消/完成入口；不选择收藏夹、不创建新收藏夹。恢复后若仍是原视频，立即翻页，避免再次停留观看一轮。收藏结果不明时保留 pending 记录，不重复点击收藏；已确认切到其他视频时不额外翻页。收藏确认请求使用约 12 秒的时间预算，超时进入跳过与恢复，页面恢复或网络重连另计。
+
+登录、账号验证、系统弹窗和输入框仍保留人工处理，未识别到唯一关闭入口时明确提示，不盲点。388 项自动检查通过，包括持久弹层端到端恢复、立即翻页、不重复写入、剩余时长限制、隐藏容器可见内容和未知/安全页面拦截。弹层结构由测试模拟，本轮未在真实 Instagram 账号执行收藏，需在用户设备复测当前界面。

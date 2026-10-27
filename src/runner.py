@@ -22,7 +22,7 @@ from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 import ai_comments
 import diagnostics
-from page_state import (PageBlocked, classify, visible_nodes, screen_height, search_input_node, search_layout, search_back_name, profile_back_name)
+from page_state import (PageBlocked, classify, visible_nodes, screen_height, search_input_node, search_layout, search_back_name, profile_back_name, collection_sheet_nodes, collection_sheet_close)
 from app_paths import DATA as ROOT, SERVER, FROZEN, load_config, lock_device
 
 ELEMENT = 'element-6066-11e4-a52e-4f735466cecf'
@@ -149,6 +149,7 @@ class Runner:
         self.reconnections = 0
         self.reconnect_times = []
         self.in_interaction = False
+        self.interaction_deadline = None
         self.refresh_required = False
         self.last_tree = None
         self.page_state = None
@@ -252,8 +253,14 @@ class Runner:
         self.check()
         readonly=method=='GET' or suffix=='/elements' or (
             suffix=='/execute/sync' and (data or {}).get('script')=='mobile: activeAppInfo')
+        def send():
+            deadline=getattr(self,'interaction_deadline',None)
+            if deadline is None:return self.http(method,self.path+suffix,data)
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise InteractionSkipped('收藏确认已超时，跳过本条，不重复发送收藏操作')
+            return self.http(method,self.path+suffix,data,timeout=min(35,remaining))
         try:
-            return self.http(method, self.path + suffix, data)
+            return send()
         except Exception as exc:
             if suffix=='/actions' and transport_error(exc):
                 raise TransportLost('滑动时控制连接中断，放弃该动作并重新识别') from exc
@@ -261,7 +268,7 @@ class Runner:
             # Only reads can be retried. Never replay a click, input, or gesture.
             self.log('read_retry',message='页面读取连接异常，短暂等待后重试')
             self.wait(.8)
-            try:return self.http(method,self.path+suffix,data)
+            try:return send()
             except Exception as retry:
                 if transport_error(retry):raise TransportLost('手机控制连接中断') from retry
                 raise
@@ -539,6 +546,7 @@ class Runner:
             input_open=any(e.tag in ('XCUIElementTypeTextField','XCUIElementTypeTextView','XCUIElementTypeSecureTextField') for e in nodes)
             if state.kind=='reels' and is_reels and not modal and not input_open and 'like-button' in names and 'comment-button' in names:
                 break
+            if collection_sheet_nodes(tree):raise NavigationLost('出现收藏夹选择弹层，需关闭后跳过本次互动')
             if attempt<2:
                 self.wait(.7)
         else:
@@ -604,11 +612,18 @@ class Runner:
             search_back=search_back_name(tree)
             search_back=search_back or next((name for name in ('Cancel','BackButton') if name in names),None)
             known_search=state.kind in ('search_input','search_context','search_results') and bool(search_back)
-            if (fields or state.kind=='input_unknown') and not known_chat and not known_search:
+            known_collection=collection_sheet_close(tree) is not None
+            if (fields or state.kind=='input_unknown') and not known_chat and not known_search and not known_collection:
                 raise RuntimeError('页面包含输入框，已停止恢复，保留当前输入内容')
             action=None
             dismiss=[e for e in nodes if e.tag=='XCUIElementTypeButton' and e.get('label','').casefold()=='dismiss']
-            if profile_back_name(tree):
+            if collection_sheet_nodes(tree):
+                try:closed=self.close_collection_sheet(tree)
+                except NavigationLost:
+                    self.wait(.4);continue
+                if not closed:raise RuntimeError('收藏夹弹层没有唯一可确认的关闭入口，请手动关闭后继续。')
+                action='close_collection'
+            elif profile_back_name(tree):
                 self.click(profile_back_name(tree));action='back'
             elif known_chat:
                 self.click('ig icon x pano outline 24');action='close_business_chat'
@@ -635,7 +650,7 @@ class Runner:
                     self.click('reels-tab');action='reels'
             if action is None:
                 raise RuntimeError('没有识别到可靠的恢复入口，请手动返回 Reels')
-            self.log('recovery_action',message={'close_sheet':'关闭已识别的浮层','reels':'重新进入 Reels',
+            self.log('recovery_action',message={'close_collection':'关闭收藏夹选择弹层，跳过本次收藏','close_sheet':'关闭已识别的浮层','reels':'重新进入 Reels',
                 'back':'返回上一页','swipe':'在 Reels 内竖向滑动一次',
                 'close_business_chat':'关闭已识别的广告咨询面板，未发送消息'}[action],attempt=attempt+1)
             previous_action=action
@@ -691,6 +706,8 @@ class Runner:
         self.log(kind, message={'likes':'已点赞','saves':'已收藏','comments':'已评论'}[kind], author=post['author'])
 
     def toggle_on(self, post, kind, name, allowed_labels):
+        previous=getattr(self,'interaction_deadline',None)
+        if kind=='saves':self.interaction_deadline=time.monotonic()+12
         try:
             return self._toggle_on(post,kind,name,allowed_labels)
         except (NavigationLost,TransportLost) as exc:
@@ -699,6 +716,7 @@ class Runner:
             if transport_error(exc) or (isinstance(exc,ControlHTTPError) and exc.kind in ('stale element reference','no such element')):
                 raise InteractionSkipped('互动控件或连接异常，结果未确认，不会重发') from exc
             raise
+        finally:self.interaction_deadline=previous
 
     def _toggle_on(self, post, kind, name, allowed_labels):
         current = self.read_reel()
@@ -720,6 +738,50 @@ class Runner:
                 self.completed(post,kind)
                 return
         raise InteractionSkipped('互动结果无法确认，已跳过；不会重试或重复点击')
+
+    def continue_after_interaction(self,post):
+        """Do not dwell on the failed post again, or replay its uncertain social write."""
+        self.in_interaction=False;self.skip_interactions_once=True
+        try:
+            try:current=self.read_reel()
+            except NavigationLost:current=self.recover_reels()
+        except TransportLost:
+            self.recover_connection();current=self.read_reel()
+        if current.get('key') and current['key']!=post.get('key'):
+            self.skip_interactions_once=False
+            return
+        if not current.get('key') or self.swipes>=self.cfg['max_swipes_per_run']:return
+        try:
+            self.swipe('up')
+            after=self.read_reel()
+        except NavigationLost:
+            try:self.recover_reels()
+            except TransportLost:self.recover_connection()
+            return
+        except TransportLost:
+            self.recover_connection();return
+        self.back_depth=0
+        changed=bool(after.get('key') and after['key']!=post.get('key'))
+        self.skip_interactions_once=not changed
+        self.log('interaction_video_skipped' if changed else 'interaction_skip_pending',message='互动未确认，已跳过当前视频并继续浏览' if changed else '本次翻页尚未确认，保留跳过互动标记，不会重发收藏或点赞')
+
+    def close_collection_sheet(self,tree):
+        self.observe(tree)
+        button=collection_sheet_close(tree)
+        if button is None:return False
+        def quoted(value):return "'"+value.replace('\\','\\\\').replace("'","\\'")+"'"
+        predicate="type == 'XCUIElementTypeButton' AND visible == true AND label == "+quoted(button.get('label',''))
+        if button.get('name'):predicate+=' AND name == '+quoted(button.get('name'))
+        found=self.command('POST','/elements',{'using':'-ios predicate string','value':predicate})
+        if len(found)!=1:return False
+        eid=found[0].get(ELEMENT) or found[0].get('ELEMENT')
+        if not eid:return False
+        try:self.command('POST','/element/'+eid+'/click',{})
+        except Exception as exc:
+            if transport_error(exc):raise TransportLost('关闭收藏夹浮层时连接中断，需要重新识别页面') from exc
+            if isinstance(exc,ControlHTTPError) and exc.kind in ('stale element reference','no such element'):raise NavigationLost('收藏夹关闭控件已变化，重新识别后再处理') from exc
+            raise
+        return True
 
     def comment(self, post):
         if self.cfg['comments_mode']=='ai':
@@ -1165,13 +1227,7 @@ class Runner:
                         self.skip_interactions_once=True
                         self.diagnose('interaction',exc)
                         self.log('interaction_skipped',message='已跳过本条互动，不会重复点击；重新识别后继续浏览',detail=str(exc))
-                        try:
-                            self.read_reel()
-                        except NavigationLost:
-                            try:self.recover_reels()
-                            except TransportLost:self.recover_connection()
-                        except TransportLost:
-                            self.recover_connection()
+                        self.continue_after_interaction(post)
                         last_key=None
                         continue
                     except TransportLost:

@@ -11,6 +11,31 @@ def screen_height(tree):
     heights=[float(e.get('height',0)) for e in tree.iter() if e.tag in ('XCUIElementTypeApplication','XCUIElementTypeWindow')]
     return max(heights,default=896) or 896
 
+def collection_sheet_nodes(tree):
+    """Only a named collection modal, never text from a video caption or a system alert."""
+    nodes=visible_nodes(tree)
+    if any(e.tag in ('XCUIElementTypeAlert','XCUIElementTypeSecureTextField') for e in nodes):return []
+    titles={'save to collection','save to collections','save to a collection','add to collection','add to a collection','select collection','select a collection','choose collection','choose a collection','saved','collections','collection','saved to collection','new collection','选择收藏夹','选择收藏集','添加到收藏夹','添加到收藏集','收藏夹','保存到收藏夹','保存到收藏集','已收藏','新建收藏夹'}
+    containers=[e for e in tree.iter() if e.get('name')=='ig-partial-modal-sheet-view-controller-content' or e.tag=='XCUIElementTypeSheet']
+    for container in containers:
+        scoped=visible_nodes(container)
+        if any(e.tag in ('XCUIElementTypeStaticText','XCUIElementTypeButton') and (e.get('label','').strip().casefold() in titles or e.get('name','').strip().casefold() in titles) for e in scoped):return scoped
+    return []
+
+def collection_sheet_close(tree):
+    scoped=collection_sheet_nodes(tree)
+    if not scoped:return None
+    nodes=visible_nodes(tree)
+    fields=[e for e in nodes if e.tag in ('XCUIElementTypeTextField','XCUIElementTypeTextView','XCUIElementTypeSearchField')]
+    # A picker may have an untouched search box. Never discard actual input,
+    # a field outside this modal, or a keyboard with no proven empty field.
+    if any(e not in scoped or (e.get('value','').strip() and e.get('value','').strip()!=e.get('placeholderValue','').strip()) for e in fields):return None
+    if any(e.tag=='XCUIElementTypeKeyboard' for e in nodes) and not fields:return None
+    labels={'dismiss','close','cancel','done','关闭','取消','完成'}
+    candidates=[e for e in scoped if e.tag=='XCUIElementTypeButton' and e.get('enabled','true')=='true' and (e.get('label','').strip().casefold() in labels or e.get('name','') in ('ig icon x pano outline 24','dismiss-button','close-button'))]
+    return candidates[0] if len(candidates)==1 else None
+
+
 def search_input_node(tree):
     nodes=visible_nodes(tree)
     if any(e.tag in ('XCUIElementTypeAlert','XCUIElementTypeSecureTextField') or e.get('name')=='ig-partial-modal-sheet-view-controller-content' for e in nodes):return None
@@ -84,6 +109,7 @@ def classify(tree, own_queries=(), expected_query=None):
         and e.get('value','').strip() in ('','Search','Search with Meta AI',*own_queries) for e in fields)
     if fields and not known_search:
         return PageState('input_unknown','页面包含输入框，保留当前输入内容')
+    if collection_sheet_nodes(tree):return PageState('sheet','出现收藏夹选择弹层，需关闭后跳过互动')
     if 'ig-partial-modal-sheet-view-controller-content' in names:
         return PageState('sheet','出现浮层，需确认关闭入口')
     if any(e.tag=='XCUIElementTypeKeyboard' for e in nodes) and not known_search:
