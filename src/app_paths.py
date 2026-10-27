@@ -13,7 +13,7 @@ PORT=14723 if FROZEN else 4723
 SERVER=f'http://127.0.0.1:{PORT}'+('/igconsole' if FROZEN else '')
 DATA=Path(os.environ.get('IG_CONSOLE_DATA_DIR',str(Path.home()/'Library/Application Support/Instagram Console'))) if FROZEN else Path(os.environ.get('IG_CONSOLE_DATA_DIR',str(SOURCE)))
 VERSION='1.2.14'  # Bundled runtime cache version.
-APP_VERSION='1.2.21'
+APP_VERSION='1.2.22'
 
 def lock_device(udid):
     if not re.fullmatch('[A-Fa-f0-9-]{10,50}',udid):raise RuntimeError('请先配置有效的 iPhone')

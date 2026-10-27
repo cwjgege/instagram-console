@@ -44,7 +44,8 @@ class Panel:
         ui.apply(root);root.title('Instagram 控制台')
         root.geometry(f'940x{min(820,root.winfo_screenheight()-100)}');root.minsize(820,580)
         outer=ttk.Frame(root,padding=20);outer.pack(fill='both',expand=True)
-        ttk.Label(outer,text=self.cfg.get('device_name') or '设备控制台',style='Title.TLabel').pack(anchor='w')
+        self.title_name=tk.StringVar(value=self.cfg.get('device_name') or '设备控制台')
+        ttk.Label(outer,textvariable=self.title_name,style='Title.TLabel').pack(anchor='w')
         self.device_label=tk.StringVar(value=('iOS '+self.cfg.get('device_ios','未知')+' · 手动运行'))
         ttk.Label(outer,textvariable=self.device_label,style='Muted.TLabel').pack(anchor='w',pady=(3,5))
         device_row=ttk.Frame(outer);device_row.pack(fill='x',pady=(0,6))
@@ -496,6 +497,8 @@ class Panel:
                 and 5<=cfg['search_watch_min']<=cfg['search_watch_max']<=90):
                 raise ValueError('搜索视频数须为 1～5，滚动次数为 1～3，观看时长为 5～90 秒且从小到大')
             validate_motion(cfg)
+            from device_store import preserve_identity
+            cfg=preserve_identity(cfg,self.__dict__.get('config_path',ROOT/'config.json'))
             atomic_json(self.__dict__.get('config_path',ROOT/'config.json'),cfg)
             self.cfg=cfg
             if not quiet: self.status.set('设置已保存')

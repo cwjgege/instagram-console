@@ -1,12 +1,12 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.21**（多设备版；公开下载版本以 Release 为准）。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.22**（多设备版；公开下载版本以 Release 为准）。
 
 ## 下载与安装
 
-[下载 v1.2.21 概率观看策略测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.21/Instagram-Console-1.2.21-AppleSilicon.dmg)
+[下载 v1.2.22 设备管理与无线核验修复测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.22/Instagram-Console-1.2.22-AppleSilicon.dmg)
 
-[查看 v1.2.21 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.21)
+[查看 v1.2.22 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.22)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 
@@ -312,3 +312,15 @@ Xcode 设备列表有时缺少 `developerModeStatus`，旧版将缺失字段当�
 选择按进度观看时没有单条固定秒数上限。保留异常保护：读取请求超时进入连接恢复，连续缺少进度数据时跳过，进度持续约 30 秒不变时停止等待。手动停止和整轮任务时长仍有效。相关性依据可读取文案/标签的本地文字近似匹配，不扩展点赞、收藏或评论触发条件。搜索结果保留原有独立观看策略。
 
 本版完成自动验证和安装包自检；按用户要求未进行新的手机实测。
+
+## 1.2.22 设备管理与无线核验修复
+
+已配置设备工具栏增加“设备管理”：软件内重命名保留手机原名，别名在扫描、重启、配置保存和连接切换后保持，并同步到配置、定位、预览和后续通知。详情显示原名和设备编号末尾。名称为去除首尾空格后的 1～40 个字符。
+
+删除前确认清理范围，设备本地目录（含配置、绑定、签名记录、编译缓存和日志）经 macOS 原生接口移至系统废纸篓，不卸载手机组件、不删除共享证书或其他设备资料。任务、安装验证或定位连接尚未结束时阻止删除。已删除记录不会被刷新、重启或迟到扫描自动添加回来；通过添加设备手动重新加入时使用默认配置，不自动恢复废纸篓资料。
+
+后台每 3 秒检查 USB 物理变化，USB 已插入设备置顶并标记，保留当前选择及控制方式。Wi-Fi 控制不会因为插线自动切为 USB；检测失败保留上次 USB 状态，变化合并触发连接刷新。
+
+修复已配对无线手机的控件指纹变化后，普通配对核验通道不可用就直接退出的问题：只有该通道不可用且开发连接为 localNetwork 时才尝试已有独立无线通道；仍核验设备编号、有效本机签名和 WDA 身份后更新绑定。明确核验到其他设备或组件不一致时不放行。核验失败保留原绑定，并记录更具体的底层原因。
+
+456 项自动检查通过，真实 Tk 窗口使用模拟设备完成排序、选择保留、名称同步、保存、删除及重新添加检查；原生系统废纸篓使用一次性测试文件验证。本轮未做手机连接、浏览或定位实测；无线故障修复仍需在对应设备重试确认。

@@ -316,7 +316,9 @@ def controller_identity(udid,port=8100):
         result=subprocess.run([str(vendor/'bin/node'),str(ASSETS/'resources/ios_device.cjs'),str(request)],env=child_env(vendor),capture_output=True,text=True,timeout=20)
         try:value=json.loads(result.stdout.splitlines()[-1])
         except (ValueError,IndexError):raise RuntimeError('未能通过已配对设备核验控件指纹，保留原绑定。') from None
-        if result.returncode or not isinstance(value,dict) or value.get('error'):raise RuntimeError('未能通过已配对设备核验控件指纹，保留原绑定。')
+        if result.returncode or not isinstance(value,dict) or value.get('error'):
+            detail=str(value.get('error','核验进程异常'))[:300] if isinstance(value,dict) else '核验结果格式异常'
+            raise RuntimeError('未能通过已配对设备核验控件指纹，保留原绑定：'+detail)
         if str(value.get('udid','')).replace('-','').lower()!=udid.replace('-','').lower() or value.get('port')!=port:raise RuntimeError('指纹核验返回了其他设备或端口，保留原绑定。')
         return value
 

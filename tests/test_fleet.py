@@ -55,7 +55,7 @@ if __name__=='__main__':unittest.main()
 
 class FleetInteraction(unittest.TestCase):
  def fleet(self):
-  f=Fleet.__new__(Fleet);f.scanning=True;f.closing=False;f.pending_starts={};f.pending_all=None;f.status=Mock();f.redraw=Mock();f.panels={};f.errors={};return f
+  f=Fleet.__new__(Fleet);f.scanning=True;f.closing=False;f.pending_starts={};f.pending_all=None;f.status=Mock();f.redraw=Mock();f.panels={};f.errors={};f.usb_ids=set();f.usb_refresh_pending=False;f.usb_checking=False;f.next_usb_check=float('inf');f.store=Mock();f.store.is_removed.return_value=False;return f
  def test_start_during_detection_waits_without_reporting_offline(self):
   f=self.fleet();f.start_device('a'*40,test=True)
   self.assertEqual(f.pending_starts['a'*40],{'test':True});self.assertEqual(f.errors,{})

@@ -164,6 +164,7 @@ class ConnectionWindow:
                 if old.get('fingerprint') and old['fingerprint']!=info['fingerprint']:raise RuntimeError('设备指纹改变，未保存。请检查地址；如更换了签名组件，请先恢复 USB 配置后重新绑定。')
                 setting.update(identifier_kind=self.identity_kind,fingerprint=info['fingerprint'],wda_url=url if mode=='remote' else '',preview_url=values['preview_url'] if mode=='remote' else '',verified_ios=info['ios'])
                 values['ios']=info['ios'];values['reported_name']=info['name']
+            if self.fleet.store.is_removed(udid):self.fleet.store.add({'udid':udid,'name':values['name'],'ios':values['ios']},explicit=True)
             cn.save(udid,setting,merge_discovered_alias=mode=='wifi')
             if mode=='wifi':dm.write_json(dm.device_dir(udid)/'setup-state.json',{'status':'ready','message':'无线 WDA 已启动并验证。'})
             return ('saved',{'udid':udid,'name':values['name'],'ios':values['ios'],'mode':mode})
@@ -189,7 +190,7 @@ class ConnectionWindow:
                             self.fleet.refresh()
                         self.status.set(f'已验证并导入 {len(data["saved"])} 台设备。'+('\n未导入（原配置保留）：\n'+'\n'.join(data['failed'][:3])+('\n另有 '+str(len(data['failed'])-3)+' 台失败，请逐台检查连接。' if len(data['failed'])>3 else '') if data['failed'] else ' 回到工作区即可选择设备连接。'))
                     else:
-                        self.fleet.store.add(data);self.udid=data['udid'];self.fleet.errors.pop(self.udid,None)
+                        self.fleet.store.add(data,explicit=True);self.udid=data['udid'];self.fleet.errors.pop(self.udid,None)
                         self.fleet.refresh();self.status.set('已保存 USB 方式，请在签名向导完成安装验证。' if data['mode']=='usb' else '连接方式已保存，WDA 服务检查通过。回到工作区建议先试运行 45 秒。')
                 elif event=='error':self.status.set(value)
                 elif event=='status':self.status.set(value)

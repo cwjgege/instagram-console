@@ -37,6 +37,37 @@ class FallbackSelection(unittest.TestCase):
   import connections as cn
   def rejected(udid,notify,stop,override,trace):
    trace['controller_channel_refused']=True;raise RuntimeError('XCTest channel rejected')
-  with patch.object(cn,'_ensure_wifi',side_effect=rejected),patch.object(cn,'stop_device') as stop,patch.object(bridge,'ensure',return_value='http://127.0.0.1:19001') as fallback:
+  import tempfile,device_manager as dm
+  with tempfile.TemporaryDirectory() as directory,patch.object(dm,'DATA',Path(directory)),patch.object(cn,'_ensure_wifi',side_effect=rejected),patch.object(cn,'stop_device') as stop,patch.object(bridge,'ensure',return_value='http://127.0.0.1:19001') as fallback:
    self.assertEqual(cn.ensure_wifi(UDID,setting_override={'mode':'wifi'}),'http://127.0.0.1:19001')
    fallback.assert_called_once();stop.assert_called_once_with(UDID)
+
+class IdentityUnavailableFallback(unittest.TestCase):
+ def failure(self,error,transport='localNetwork'):
+  def fail(udid,notify,stop,override,trace):
+   trace.update(stage='existing_endpoint',transport=transport);raise error
+  return fail
+ def test_unavailable_paired_proof_on_wifi_selects_verified_fallback(self):
+  import tempfile
+  import connections as cn,device_manager as dm
+  with tempfile.TemporaryDirectory() as folder,patch.object(dm,'DATA',Path(folder)),patch.object(cn,'_ensure_wifi',side_effect=self.failure(cn.IdentityProofUnavailable('usbmux unavailable'))),patch.object(cn,'stop_device'),patch.object(bridge,'ensure',return_value='http://127.0.0.1:19001') as fallback:
+   self.assertEqual(cn.ensure_wifi(UDID,setting_override={'mode':'wifi','fingerprint':'old'}),'http://127.0.0.1:19001')
+   self.assertEqual(fallback.call_args.args[1]['fingerprint'],'old')
+   attempt=json.loads((dm.device_dir(UDID)/'connection-attempt.json').read_text());self.assertEqual(attempt['fallback_reason'],'paired_identity_unavailable')
+ def test_actual_identity_mismatch_and_unknown_transport_do_not_select_fallback(self):
+  import tempfile
+  import connections as cn,device_manager as dm
+  for error,transport in ((cn.FingerprintMismatch('wrong device'),'localNetwork'),(cn.IdentityProofUnavailable('no proof'),'wired'),(RuntimeError('ordinary failure'),'localNetwork')):
+   with tempfile.TemporaryDirectory() as folder,patch.object(dm,'DATA',Path(folder)),patch.object(cn,'_ensure_wifi',side_effect=self.failure(error,transport)),patch.object(cn,'stop_device'),patch.object(bridge,'ensure') as fallback,self.assertRaises(RuntimeError):cn.ensure_wifi(UDID)
+   fallback.assert_not_called()
+ def test_failed_fallback_preserves_existing_binding_and_both_errors(self):
+  import tempfile
+  import connections as cn,device_manager as dm
+  with tempfile.TemporaryDirectory() as folder,patch.object(dm,'DATA',Path(folder)):
+   old={'mode':'wifi','fingerprint':'old'};cn.save(UDID,old)
+   with patch.object(cn,'_ensure_wifi',side_effect=self.failure(cn.IdentityProofUnavailable('paired proof unavailable'))),patch.object(cn,'stop_device'),patch.object(bridge,'ensure',side_effect=RuntimeError('signed proof failed')),self.assertRaisesRegex(RuntimeError,'signed proof failed'):cn.ensure_wifi(UDID)
+   self.assertEqual(cn.load(UDID),old)
+ def test_cancelled_fallback_never_saves_or_retries(self):
+  import connections as cn
+  from runner import Halt
+  with patch.object(cn,'_ensure_wifi',side_effect=self.failure(cn.IdentityProofUnavailable('unavailable'))),patch.object(cn,'stop_device'),patch.object(bridge,'ensure',side_effect=Halt('stop')),self.assertRaises(Halt):cn.ensure_wifi(UDID,setting_override={'mode':'wifi'})

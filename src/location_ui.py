@@ -17,7 +17,9 @@ class LocationWindow:
         w.bind('<Command-f>',lambda _:self.open_map())
         body=ui.scroll_form(w,padding=22)
         ttk.Label(body,text='固定定位',font=('PingFang SC',22,'bold')).pack(anchor='w')
-        ttk.Label(body,text=cfg.get('device_name','iPhone')+'  ·  iOS '+cfg.get('device_ios','未知')+'  ·  编号末尾 '+self.udid[-8:],style='Muted.TLabel').pack(anchor='w',pady=(6,18))
+        self.identity_text=tk.StringVar()
+        self.update_identity(cfg)
+        ttk.Label(body,textvariable=self.identity_text,style='Muted.TLabel').pack(anchor='w',pady=(6,18))
         ttk.Label(body,text='通过 USB 或已配对的无线连接设置此手机的位置。首次使用请先完成电脑信任、开发者模式和 Xcode 设备准备。',wraplength=560).pack(fill='x',pady=(0,18))
         saved=self.manager.snapshot(self.udid)
         self.lat=tk.StringVar(value=str(saved.get('latitude') if saved.get('latitude') is not None else ''))
@@ -46,6 +48,11 @@ class LocationWindow:
         try:validate_target(self.udid);self.target_error=''
         except ValueError as exc:self.target_error=str(exc)
         self.error='';self.was_busy=False;self.poll()
+    def update_identity(self,cfg):
+        name=cfg.get('device_alias') or cfg.get('device_name','iPhone')
+        self.window.title('固定定位 · '+name)
+        self.identity_text.set(name+'  ·  iOS '+cfg.get('device_ios','未知')+'  ·  编号末尾 '+self.udid[-8:])
+
     def open_map(self):
         if self.map_window and not self.map_window.closed:self.map_window.window.lift();return
         from location_map import MapWindow

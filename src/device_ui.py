@@ -154,6 +154,13 @@ class DeviceWindow:
             if hasattr(self,'verify_button') and not self.busy and state not in ('unknown','expired'):self.verify_button.configure(state='normal')
             team=record['team_id'];self.team.set(next((label for label,value in self.team_map.items() if value==team),team))
 
+    def begin_add(self,device):
+        store=self.panel.__dict__.get('store')
+        if store and store.is_removed(device['udid']):
+            try:store.add(device,explicit=True)
+            except (OSError,ValueError) as exc:self.status.set('重新添加失败：'+str(exc));return False
+        return True
+
     def install(self):
         if self.busy:return
         if self.panel.worker and self.panel.worker.is_alive():
@@ -163,6 +170,7 @@ class DeviceWindow:
         team=self.team_map.get(self.team.get(),self.team.get().strip())
         if not __import__('re').fullmatch('[A-Z0-9]{10}',team):
             self.status.set('请选择签名团队，或输入正确的 10 位 Team ID。');return
+        if not self.begin_add(device):return
         self.wireless_stop.set();self.awaiting_wireless=None
         auto=self.auto_wireless.get()
         def job():
@@ -177,6 +185,7 @@ class DeviceWindow:
         if self.panel.worker and self.panel.worker.is_alive():self.status.set('请先停止浏览，再验证控制组件。');return
         device=self.selected()
         if not device:self.status.set('请先连接并选择 USB iPhone。');return
+        if not self.begin_add(device):return
         self.wireless_stop.set();self.awaiting_wireless=None
         auto=self.auto_wireless.get()
         def job():
@@ -239,8 +248,10 @@ class DeviceWindow:
         if callback:
             callback(device);self.last_result='设备已添加，可在总览独立开始。';self.status.set(self.last_result);return
         self.panel.cfg.update(device_udid=device['udid'],device_name=device['name'],runtime_dir=str(dm.device_dir(device['udid'])))
+        from device_store import preserve_identity
+        self.panel.cfg=preserve_identity(self.panel.cfg,self.panel.__dict__.get('config_path',DATA/'config.json'))
         dm.write_json(self.panel.__dict__.get('config_path',DATA/'config.json'),self.panel.cfg)
-        self.panel.device_label.set(device['name']+' · USB 实机控制 · 手动运行')
+        self.panel.device_label.set(self.panel.cfg.get('device_name',device['name'])+' · USB 实机控制 · 手动运行')
         self.panel.status.set('设备已配置，可点击开始浏览。');self.panel.update_signature()
         self.last_result='已选择 '+device['name']+'。现在可以关闭本窗口并开始浏览。'
         self.status.set(self.last_result)

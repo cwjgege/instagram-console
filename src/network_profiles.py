@@ -162,7 +162,7 @@ def enroll(store,descriptor,running=lambda _:False):
         cfg_path=store.path(udid);connection_path=dm.device_dir(udid)/'connection.json';runtime_path=dm.device_dir(udid)/'network-runtime.json'
         paths=(cfg_path,connection_path,runtime_path);before={p:p.read_bytes() if p.exists() else None for p in paths}
         try:
-            cn.save(udid,setting);store.add(profile)
+            store.add(profile,explicit=True);cn.save(udid,setting)
             dm.write_json(runtime_path,{**info,'preview_url':item['preview_url']})
         except Exception:
             for path,raw in before.items():

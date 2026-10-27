@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from urllib.request import build_opener,ProxyHandler,Request,HTTPRedirectHandler
 
 class FingerprintMismatch(RuntimeError):pass
+class IdentityProofUnavailable(FingerprintMismatch):pass
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs):raise RuntimeError('网络 WDA 不允许 HTTP 重定向，请填写实际私网地址。')
@@ -138,7 +139,7 @@ def refresh_wifi_identity(udid,setting,url,info,port,stop=None,notify=lambda s:N
     if not re.fullmatch(r'com\.igconsole\.[A-Za-z0-9_.-]+\.xctrunner',bundle):raise FingerprintMismatch('本机签名组件标识无效，未自动更新指纹。')
     notify('控件指纹已变化，正在通过已配对设备编号核验同一台手机…')
     try:proof=dm.controller_identity(udid,port)
-    except (OSError,RuntimeError,subprocess.SubprocessError) as exc:raise FingerprintMismatch('未能通过已配对手机核验指纹，原绑定保留：'+str(exc)[:200]) from exc
+    except (OSError,RuntimeError,subprocess.SubprocessError) as exc:raise IdentityProofUnavailable('未能通过已配对手机核验指纹，原绑定保留：'+str(exc)[:200]) from exc
     check()
     allowed={bundle,bundle.removesuffix('.xctrunner')}
     if proof.get('udid')!=udid or proof.get('fingerprint')!=info.get('fingerprint') or not info.get('fingerprint') or proof.get('bundle') not in allowed or info.get('bundle') not in allowed:
@@ -334,9 +335,18 @@ def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
         stop_device(udid);raise
     except Exception as exc:
         stop_device(udid)
-        if trace.get('controller_channel_refused'):
+        if trace.get('controller_channel_refused') or (isinstance(exc,IdentityProofUnavailable) and trace.get('transport')=='localNetwork'):
+            trace['fallback_reason']='paired_identity_unavailable' if isinstance(exc,IdentityProofUnavailable) else 'controller_channel_refused'
+            notify('当前无线核验通道不可用，正在通过独立配对通道重新核验设备和签名；不会直接接受新指纹。')
             import controller_bridge
-            try:return controller_bridge.ensure(udid,setting_override or load(udid),notify,stop)
+            try:
+                url=controller_bridge.ensure(udid,setting_override or load(udid),notify,stop)
+                try:
+                    import device_manager as dm
+                    from app_paths import APP_VERSION
+                    dm.write_json(dm.device_dir(udid)/'connection-attempt.json',{**trace,'selected_url':url,'timestamp':time.time(),'app_version':APP_VERSION})
+                except OSError:pass
+                return url
             except Halt:
                 stop_device(udid);raise
             except Exception as fallback:
