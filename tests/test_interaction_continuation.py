@@ -43,7 +43,8 @@ class InteractionContinuation(unittest.TestCase):
   def reconnect():
    self.assertFalse(r.in_interaction);state['failed']=True
   r.recover_connection=Mock(side_effect=reconnect)
-  with patch.dict('os.environ',{'IG_CONSOLE_LOCK_DIR':str(self.root/'locks')}):status=r.run()
+  r.seconds=100
+  with patch('runner.time.monotonic',side_effect=lambda:100 if r.swipes>=2 else 0),patch.dict('os.environ',{'IG_CONSOLE_LOCK_DIR':str(self.root/'locks')}):status=r.run()
   return r,status,clicks
  def test_unconfirmed_like_and_save_continue_without_repeating_click(self):
   for kind in ('likes','saves'):

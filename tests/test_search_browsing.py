@@ -57,7 +57,7 @@ class SearchBudget(unittest.TestCase):
  def test_expired_search_budget_cleared_before_return_navigation(self):
   import time
   with tempfile.TemporaryDirectory() as directory:
-   r=Runner({**CFG,'runtime_dir':directory},notify=lambda _:None);r.diagnose=Mock()
+   r=Runner({**CFG,'runtime_dir':directory},notify=lambda _:None);r.diagnose=Mock();r.control_available=Mock(return_value=True)
    def stuck(term):
     r.search_deadline=time.monotonic()-1;r.check()
    r.search=stuck
@@ -77,7 +77,7 @@ class SearchStageBudget(unittest.TestCase):
   self.tmp=tempfile.TemporaryDirectory();self.now=1000.;self.events=[]
   self.clock=patch('runner.time.monotonic',side_effect=lambda:self.now);self.clock.start()
   self.r=Runner({**CFG,'runtime_dir':self.tmp.name},notify=self.events.append)
-  self.r.feature_state['search']['enabled']=True;self.r.diagnose=Mock();self.r.return_from_search=Mock()
+  self.r.feature_state['search']['enabled']=True;self.r.diagnose=Mock();self.r.return_from_search=Mock();self.r.control_available=Mock(return_value=True)
  def tearDown(self):self.clock.stop();self.tmp.cleanup()
  def advance(self,seconds,value=None):
   self.now+=seconds;self.r.check();return value

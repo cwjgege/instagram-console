@@ -46,6 +46,7 @@ class WatchRelevance(unittest.TestCase):
    def swipe(direction):
     state['i']+=1;r.swipes+=1;r.last_swipe_post=current()
    r.swipe=swipe
-   with patch.dict(os.environ,IG_CONSOLE_LOCK_DIR=str(Path(directory)/'locks')):self.assertEqual(r.run(),'complete')
+   r.seconds=100
+   with patch('runner.time.monotonic',side_effect=lambda:100 if r.swipes>=4 else 0),patch.dict(os.environ,IG_CONSOLE_LOCK_DIR=str(Path(directory)/'locks')):self.assertEqual(r.run(),'complete')
    watched=[(call.args[0]['key'],call.args[1]) for call in r.watch_video.call_args_list]
    self.assertIn(('1',True),watched)

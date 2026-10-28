@@ -23,3 +23,9 @@ class Alerts(unittest.TestCase):
   event=threading.Event();alerts=TaskAlerts('/unused','phone',lambda *args:event.set())
   with patch('notifications.Path.mkdir',side_effect=OSError()):self.assertTrue(alerts.handle(1,{'event':'resume_blocked'}))
   self.assertTrue(event.wait(2))
+ def test_location_failure_and_recovery_banners_do_not_include_coordinates(self):
+  with tempfile.TemporaryDirectory() as root:
+   event=threading.Event();send=Mock(side_effect=lambda *args:event.set());alerts=TaskAlerts(root,'test-phone',send)
+   for kind in ('location_unconfirmed','location_recovered'):
+    event.clear();self.assertTrue(alerts.handle(1,{'event':kind,'message':'private 40.7128,-74.006'}));self.assertTrue(event.wait(2))
+   self.assertEqual(send.call_count,2);self.assertNotIn('40.7128',str(send.call_args_list))

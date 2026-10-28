@@ -561,7 +561,7 @@ class Panel:
             return
         self.stop_event=threading.Event()
         run_cfg=dict(self.cfg)
-        if diagnostic:run_cfg.update(enable_likes=False,enable_saves=False,enable_comments=False,enable_search=True,max_swipes_per_run=1000)
+        if diagnostic:run_cfg.update(enable_likes=False,enable_saves=False,enable_comments=False,enable_search=True)
         self.generation+=1
         generation=self.generation
         notify=lambda row:self.events.put({**row,'generation':generation})

@@ -312,14 +312,14 @@ class Runner:
             return send()
         except Exception as exc:
             if suffix=='/actions' and transport_error(exc):
-                raise TransportLost('滑动时控制连接中断，放弃该动作并重新识别') from exc
+                raise TransportLost('滑动响应超时或异常，动作结果待确认，不重复发送') from exc
             if not readonly or not transport_error(exc):raise
             # Only reads can be retried. Never replay a click, input, or gesture.
             self.log('read_retry',message='页面读取超时或连接异常，短暂等待后重试')
             self.wait(.8)
             try:return send()
             except Exception as retry:
-                if transport_error(retry):raise TransportLost('手机控制连接中断') from retry
+                if transport_error(retry):raise TransportLost('页面读取未获得响应，连接状态待确认') from retry
                 raise
 
     def mobile(self, name, **args):
@@ -556,6 +556,41 @@ class Runner:
         self.check()
         self.log('connected', message='已连接 iPhone')
 
+    def control_available(self):
+        """Probe the phone through the current session, without replaying UI writes.
+
+        A local Appium /status response cannot establish phone reachability.
+        This read has its own budget after the failed operation's budget expires.
+        """
+        names=('search_deadline','search_overall_deadline','interaction_deadline','watch_read_deadline')
+        saved={name:getattr(self,name,None) for name in names}
+        try:
+            for name in names:setattr(self,name,None)
+            return self._probe_control_available()
+        finally:
+            for name,value in saved.items():setattr(self,name,value)
+
+    def _probe_control_available(self):
+        # Use different read paths: activeAppInfo can stall while gestures and
+        # the window endpoint still work. Local Appium health is not evidence.
+        probes=(('GET','/window/rect',None),('POST','/execute/sync',{'script':'mobile: activeAppInfo','args':[{}]}))
+        for attempt,(method,suffix,data) in enumerate(probes):
+            self.check()
+            try:
+                info=self.http(method,self.path+suffix,data,timeout=15)
+                valid=isinstance(info,dict) and ((suffix=='/window/rect' and
+                    all(isinstance(info.get(k),(int,float)) and info[k]>0 for k in ('width','height'))) or
+                    (suffix=='/execute/sync' and isinstance(info.get('bundleId'),str) and bool(info['bundleId'])))
+                if valid:
+                    self.log('control_probe_ok',message='手机控制通道仍可响应，保留当前连接',attempt=attempt+1)
+                    return True
+            except (Halt,PageBlocked):raise
+            except Exception as exc:
+                self.log('control_probe_failed',message='当前会话尚未确认手机响应',attempt=attempt+1,
+                         reason=diagnostics.redact(str(exc)))
+            if attempt==0:self.wait(1)
+        return False
+
     def recover_connection(self):
         self.check()
         if self.in_interaction:raise RuntimeError('互动过程中连接中断，结果未确认，已停止且不会重发')
@@ -707,7 +742,13 @@ class Runner:
             self.wait(1.5)
             self.watch_read_deadline=time.monotonic()+8
             try:fresh=self.read_reel()
-            except WatchBudgetExpired as exc:raise TransportLost('播放进度读取超时，需要重新检查控制连接') from exc
+            except Exception as exc:
+                if not isinstance(exc,(WatchBudgetExpired,TransportLost)) and not transport_error(exc):raise
+                self.watch_read_deadline=None
+                self.log('watch_read_timeout',message='播放进度读取未完成，跳过进度判断，尝试一次翻页；不据此判定断线')
+                current['done']=True
+                self.log('watch_progress_skipped',message='跳过本条进度和互动，单次翻页后核对视频控件')
+                return True
             finally:self.watch_read_deadline=None
             if fresh.get('key')!=key:raise InteractionSkipped('观看期间视频已变化，跳过旧视频互动')
             following=observed_progress(fresh);now=time.monotonic()
@@ -928,7 +969,8 @@ class Runner:
         if current.get('key') and current['key']!=post.get('key'):
             self.skip_interactions_once=False
             return
-        if not current.get('key') or self.swipes>=self.cfg['max_swipes_per_run']:return
+        if not current.get('key'):return
+        self.check()
         try:
             self.swipe('up')
             after=self.read_reel()
@@ -1196,12 +1238,14 @@ class Runner:
             self.feature_state['search']={'enabled':False,'reason':'搜索失败，正在恢复视频浏览'}
             self.diagnose('search',exc)
             self.log('search_recovering',message='本次搜索已放弃，正在确认能否继续短视频浏览',reason=diagnostics.redact(str(exc)))
-            if isinstance(exc,TransportLost) or transport_error(exc):
-                self.recover_connection()
-            else:
-                try:self.return_from_search()
-                except TransportLost:self.recover_connection()
-                except NavigationLost as recovery:raise RuntimeError('搜索恢复未能确认视频页面，请检查连接和手机页面后重新开始') from recovery
+            while True:
+                try:
+                    # Always re-observe before navigating. Never replay search
+                    # input or an uncertain action from the failed search.
+                    self.return_from_search()
+                    break
+                except TransportLost:self.wait_for_page_response()
+                except NavigationLost as recovery:raise RuntimeError('搜索恢复未能确认视频页面，请检查手机页面后重新开始') from recovery
             # Schedule from successful recovery, never from the start of a long search.
             if self.search_consecutive_failures>=3 or self.search_attempts>=self.cfg['max_searches_per_run']:
                 self.search_retry_at=None
@@ -1330,9 +1374,14 @@ class Runner:
         raise NavigationLost('搜索结果页面未能确认，返回浏览入口')
 
 
-    def gesture(self, direction):
+    def gesture(self, direction, allow_cached_rect=False):
         if direction not in ('up','down'):raise ValueError('仅支持竖向滑动')
-        rect=self.command('GET','/window/rect')
+        self._gesture_action_attempted=False
+        cached=getattr(self,'_gesture_rect_cache',None)
+        if allow_cached_rect and cached and cached[0]==self.path:
+            rect=cached[1]
+        else:rect=self.command('GET','/window/rect')
+        self._gesture_rect_cache=(self.path,rect)
         w,h=rect['width'],rect['height'];c=self.cfg
         distance=self.rng.uniform(c['gesture_distance_min'],c['gesture_distance_max'])/100*h
         top,bottom=c['gesture_top']/100*h,c['gesture_bottom']/100*h
@@ -1342,6 +1391,7 @@ class Runner:
         duration=round(self.rng.uniform(c['gesture_duration_min'],c['gesture_duration_max']))
         x,y1,y2=round(x),round(y1),round(y2)
         # One vertical stroke, inside the configured central safe rectangle.
+        self._gesture_action_attempted=True
         self.command('POST','/actions',{'actions':[{'type':'pointer','id':'finger',
             'parameters':{'pointerType':'touch'},'actions':[
             {'type':'pointerMove','duration':0,'origin':'viewport','x':x,'y':y1},
@@ -1350,6 +1400,75 @@ class Runner:
             {'type':'pointerUp','button':0}]}]})
         self.log('gesture',message='已完成中央区域竖向滑动',direction=direction,
                  start=[x,y1],end=[x,y2],duration_ms=duration)
+
+    def wait_for_page_response(self):
+        """Wait without UI writes; reconnect only after repeated independent failures."""
+        failures=0
+        while True:
+            self.check()
+            try:
+                old=getattr(self,'watch_read_deadline',None)
+                try:
+                    self.watch_read_deadline=time.monotonic()+15
+                    tree=self.snapshot()
+                    self.observe(tree)
+                finally:self.watch_read_deadline=old
+                self.log('page_response_restored',message='页面读取已恢复，保留当前连接')
+                return tree
+            except (Halt,PageBlocked):raise
+            except Exception as exc:
+                if not isinstance(exc,(TransportLost,WatchBudgetExpired)) and not transport_error(exc):raise
+            if self.control_available():failures=0
+            else:failures+=1
+            if failures>=2:
+                self.log('control_unresponsive',message='页面读取及不同控制检查连续无响应，进入重连')
+                self.recover_connection()
+                return None
+            self.log('page_response_waiting',message='页面读取待确认，暂不重建连接，不重复发送动作',failed_checks=failures)
+            self.wait(5)
+
+    def advance_after_read_timeout(self,before):
+        """One normal swipe from the last verified Reel; never resend on timeout."""
+        self.skip_interactions_once=True
+        uncertain=False
+        try:self.gesture('up',allow_cached_rect=True)
+        except Exception as exc:
+            if not isinstance(exc,TransportLost) and not transport_error(exc):raise
+            if not getattr(self,'_gesture_action_attempted',False):
+                self.wait_for_page_response()
+                return
+            uncertain=True
+            self.log('swipe_pending',message='滑动结果待确认，等待页面读回，不重复发送滑动')
+        if not uncertain:
+            self.swipes+=1;self.position+=1
+            self.log('swipe',direction='up',message='进度读取异常后已执行一次翻页，等待视频信息确认')
+        self.wait(2)
+        # A late response may arrive after the action request timed out. Only
+        # read from here onward; no gesture retries or social interactions.
+        while True:
+            self.check()
+            try:
+                old=getattr(self,'watch_read_deadline',None)
+                try:
+                    self.watch_read_deadline=time.monotonic()+15
+                    after=self.read_reel()
+                finally:self.watch_read_deadline=old
+            except (TransportLost,WatchBudgetExpired):
+                tree=self.wait_for_page_response()
+                if tree is None:return
+                continue
+            if not before.get('key') or not after.get('key'):
+                self.log('swipe_pending',message='尚无可比较的视频标识，继续等待，不重复滑动')
+                self.wait(5);continue
+            changed=before['key']!=after['key']
+            if uncertain and not changed:
+                self.log('swipe_pending',message='滑动响应未确认且视频标识未变化，继续等待，不重复发送')
+                self.wait(5);continue
+            if uncertain:self.swipes+=1;self.position+=1
+            self.last_swipe_post=after;self.skip_interactions_once=True
+            self.log('swipe_verified' if changed else 'swipe_unchanged',
+                     message='已通过视频控件确认切页，继续浏览' if changed else '滑动已响应，视频尚未变化，保留页面继续浏览')
+            return
 
     def swipe(self, direction):
         before=self.read_reel()
@@ -1409,7 +1528,7 @@ class Runner:
             self.pause_enabled=True
             next_search=time.monotonic()+self.rng.uniform(45,90)
             last_key=None
-            while self.swipes < self.cfg['max_swipes_per_run']:
+            while True:
                 try:
                     try:
                         self.check()
@@ -1429,7 +1548,10 @@ class Runner:
                             self.refresh_required=True
                             raise NavigationLost('连续翻页后仍停留同一内容')
                         last_key=post['key']
-                        self.watch_video(post,viewing_related)
+                        if self.watch_video(post,viewing_related) is True:
+                            self.advance_after_read_timeout(post)
+                            last_key=None
+                            continue
                         if skip_interaction:self.log('handoff_skip',message='人工接管后的当前视频跳过互动')
                         if not skip_interaction:self.consider_like(post,related)
                         self.check()
@@ -1455,14 +1577,16 @@ class Runner:
                             continue
                         if self.back_depth==0 and self.position>=2 and self.rng.random()<.1:
                             burst=self.rng.choices([1,2],[.8,.2])[0]
-                            for _ in range(min(burst,self.position,self.cfg['max_swipes_per_run']-self.swipes)):
+                            for _ in range(min(burst,self.position)):
+                                self.check()
                                 self.swipe('down')
                                 self.wait(self.rng.uniform(2,5))
                             self.back_depth=burst
                         else:
                             burst=self.rng.choices([1,2,3],[.8,.16,.04])[0]
                             advanced=0
-                            for _ in range(min(burst,self.cfg['max_swipes_per_run']-self.swipes)):
+                            for _ in range(burst):
+                                self.check()
                                 self.last_swipe_post=None
                                 self.swipe('up');advanced+=1
                                 if self.last_swipe_post and self.watch_related(self.last_swipe_post):
@@ -1482,7 +1606,9 @@ class Runner:
                         last_key=None
                         continue
                     except TransportLost:
-                        self.recover_connection()
+                        if self.in_interaction:raise RuntimeError('互动结果未确认，已停止且不会重发')
+                        self.skip_interactions_once=True
+                        self.wait_for_page_response()
                         last_key=None
                         continue
                     except NavigationLost as exc:

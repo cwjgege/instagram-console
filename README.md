@@ -1,12 +1,20 @@
 # Instagram 控制台
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.29**（多设备版；公开下载版本以 Release 为准）。
+1.2.33 测试版将读取超时与控制失效分开：进度读取失败后只尝试一次翻页，通过视频控件标识核对；滑动回包超时时只等待读回，不重复发送。搜索异常优先安全返回，页面与不同控制检查连续失败后才重连。
+
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.33**。
+
+验证范围：554 项自动测试、安装包自检、单次超时翻页实测通过；运行中一次实际进度超时也已成功切页且未重连。最新长测在 9 分 26 秒时因第二轮搜索无法确认 Instagram 前台、返回视频页失败而停止，尚未通过两小时稳定性验证；定位持续读回和无线恢复也不能保证始终可用。
+
+1.2.31 取消每轮翻页次数上限，包括旧配置保存的上限。翻页统计继续显示，任务按所设运行时长结束；手动停止及故障停止仍有效。
+
+1.2.30 的定位保持直接核验定位响应中的设备指纹，减少每轮状态与设备信息查询，读取超时为 15 秒。过期样本会触发有频率限制的定位采集重启，不冒充新位置；持续 2 分钟无法确认时发出通知，读回恢复后通知一次。空闲设备可恢复已有无线控制通道，正在运行的浏览任务保留重连所有权。5 分钟内 3 次纠偏后继续读回，限额窗口释放后自动重试。上述逻辑不修改代理设置，也不能保证断网期间的位置。
 
 ## 下载与安装
 
-[下载 v1.2.29 重连优化与搜索兜底测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.29/Instagram-Console-1.2.29-AppleSilicon.dmg)
+[下载 v1.2.33 读取超时降级与单次翻页测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.33/Instagram-Console-1.2.33-AppleSilicon.dmg)
 
-[查看 v1.2.29 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.29)
+[查看 v1.2.33 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.33)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 

@@ -4,7 +4,7 @@ from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path('src').resolve()))
 import device_manager as dm,location_manager as lm
 from location_guard import LocationGuard
-from location_readback import sample,ReadbackError,distance_m,LocationReader
+from location_readback import sample,ReadbackError,distance_m,LocationReader,IdentityMismatch,StaleLocation
 ONE='00008030-0011223344556677';TWO='00008030-008899AABBCCDDEE'
 def reading(**changes):
  return {'locationSchema':1,'deviceFingerprint':'phone-one','authorizationStatus':3,'locationServicesEnabled':True,'accuracyAuthorization':0,'valid':True,'latitude':40.7128,'longitude':-74.006,'timestamp':time.time(),'horizontalAccuracy':5,**changes}
@@ -22,7 +22,38 @@ class Readback(unittest.TestCase):
  def test_wifi_sample_requires_saved_identity_and_uses_device_endpoint(self):
   reader=LocationReader()
   with patch('connections.load',return_value={'mode':'remote','wda_url':'http://192.168.1.9:8100','fingerprint':'phone-one'}),patch('connections.checked') as checked,patch('connections.get',return_value=reading()) as get:
-   reader.read(ONE);checked.assert_called_with('http://192.168.1.9:8100','phone-one');self.assertEqual(get.call_args.args[1],'/wda/device/location')
+   reader.read(ONE);checked.assert_not_called();self.assertEqual(get.call_args.args[1],'/wda/device/location');self.assertEqual(get.call_args.kwargs['timeout'],15)
+ def test_location_identity_is_checked_without_any_status_probe(self):
+  with patch('connections.load',return_value={'mode':'remote','wda_url':'http://192.168.1.9:8100','fingerprint':'phone-one'}),patch('connections.checked') as checked,patch('connections.get',return_value=reading(deviceFingerprint='another-phone')),self.assertRaises(IdentityMismatch):LocationReader().read(ONE)
+  checked.assert_not_called()
+ def test_old_samples_refresh_only_the_corelocation_reader_with_a_cooldown(self):
+  reader=LocationReader();response=Mock();response.__enter__=Mock(return_value=response);response.__exit__=Mock(return_value=False)
+  opener=Mock();opener.open.return_value=response
+  with patch.object(reader,'read_endpoint',return_value=('http://127.0.0.1:19001','phone-one')),patch('location_readback.build_opener',return_value=opener),patch('connections.get',return_value=reading(timestamp=time.time()-40)):
+   for _ in range(2):
+    with self.assertRaises(StaleLocation):reader.read(ONE)
+  self.assertEqual(opener.open.call_count,1)
+  request=opener.open.call_args.args[0];self.assertTrue(request.full_url.endswith('/wda/device/location/stop'))
+  self.assertIn(b'phone-one',request.data)
+ def test_read_follows_reconnected_runtime_endpoint_without_restarting_controller(self):
+  with tempfile.TemporaryDirectory() as tmp,patch.object(dm,'DATA',Path(tmp)),patch('connections.load',return_value={'mode':'wifi','fingerprint':'phone-one'}),patch('connections.ensure_wifi') as ensure,patch('connections.get',return_value=reading()):
+   reader=LocationReader();reader.heartbeats[ONE]=time.monotonic()
+   for port in (19001,19003):
+    dm.write_json(dm.device_dir(ONE)/'network-runtime.json',{'url':f'http://127.0.0.1:{port}'})
+    reader.read(ONE);self.assertEqual(reader.bindings[ONE][0],f'http://127.0.0.1:{port}')
+   ensure.assert_not_called()
+ def test_idle_wifi_reader_can_recover_but_cannot_restart_a_browsing_phone(self):
+  reader=LocationReader();owner=Mock()
+  with patch('connections.load',return_value={'mode':'wifi'}),patch('app_paths.lock_device',return_value=owner),patch.object(reader,'prepare') as prepare:
+   self.assertTrue(reader.recover(ONE));prepare.assert_called_once_with(ONE,None);owner.close.assert_called_once()
+   self.assertFalse(reader.recover(ONE))
+  reader=LocationReader()
+  with patch('connections.load',return_value={'mode':'wifi'}),patch('app_paths.lock_device',side_effect=RuntimeError('busy')),patch.object(reader,'prepare') as prepare:
+   self.assertFalse(reader.recover(ONE));prepare.assert_not_called()
+ def test_cancelled_recovery_does_not_start_controller(self):
+  reader=LocationReader();reader.cancel=threading.Event();reader.cancel.set();owner=Mock()
+  with patch('connections.load',return_value={'mode':'wifi'}),patch('app_paths.lock_device',return_value=owner),patch.object(reader,'prepare') as prepare:
+   self.assertFalse(reader.recover(ONE));prepare.assert_not_called();owner.close.assert_called_once()
  def test_permission_request_only_activates_the_signed_selected_bundle(self):
   reader=LocationReader();record={'udid':ONE,'bundle_id':'com.example.wda.xctrunner'}
   with patch('location_manager.validate_target'),patch.object(dm,'signing_record',return_value=record),patch.object(reader,'prepare',return_value=('http://192.168.1.9:8100','phone-one')),patch.object(dm,'coredevice') as native,patch('connections.checked'),patch('connections.get',return_value=reading(authorizationStatus=0)):reader.request_permission(ONE)
@@ -41,7 +72,7 @@ class Guard(unittest.TestCase):
   self.tmp=tempfile.TemporaryDirectory();self.data=patch.object(dm,'DATA',Path(self.tmp.name));self.data.start();self.m=lm.LocationManager();self.readers=[]
   def factory():
    r=Mock();self.readers.append(r);return r
-  self.guard=LocationGuard(self.m,factory);self.m.guard=self.guard;self.m._request=Mock()
+  self.guard=LocationGuard(self.m,factory);self.m.guard=self.guard;self.m._request=Mock();self.m.alert=Mock()
  def tearDown(self):self.guard.stop_all();self.data.stop();self.tmp.cleanup()
  def start(self,udid=ONE):
   self.m._state(udid,'applied','accepted',latitude=lm.NEW_YORK[0],longitude=lm.NEW_YORK[1])
@@ -73,6 +104,23 @@ class Guard(unittest.TestCase):
   s=self.start();s['reader'].read.return_value=sample(reading(latitude=42),'phone-one')
   for _ in range(4):self.guard.tick(ONE,s)
   self.assertEqual(self.m._request.call_count,3);self.assertEqual(self.m.snapshot(ONE)['guard_status'],'paused')
+  # Reads continue while writes cool down; correction resumes automatically.
+  self.assertFalse(s['blocked']);s['corrections'].clear();self.guard.tick(ONE,s)
+  self.assertEqual(self.m._request.call_count,4)
+ def test_prolonged_invalid_reads_alert_once_and_fresh_recovery_alerts_once(self):
+  s=self.start();s['reader'].read.side_effect=StaleLocation('waiting')
+  s['unconfirmed_since']=time.time()-121
+  self.guard.tick(ONE,s);self.guard.tick(ONE,s)
+  self.m.alert.assert_called_once_with(ONE,'location_unconfirmed')
+  s['reader'].read.side_effect=None;s['reader'].read.return_value=sample(reading(),'phone-one')
+  self.guard.tick(ONE,s);self.guard.tick(ONE,s)
+  self.assertEqual(self.m.alert.call_count,2);self.m.alert.assert_called_with(ONE,'location_recovered')
+  self.assertIsNone(self.m.snapshot(ONE)['guard_unconfirmed_since'])
+ def test_wrong_device_stops_reads_and_alerts_without_changing_location(self):
+  s=self.start();s['reader'].read.side_effect=IdentityMismatch('wrong phone')
+  self.guard.tick(ONE,s);self.guard.tick(ONE,s)
+  self.assertTrue(s['blocked']);self.assertEqual(s['reader'].read.call_count,1)
+  self.m._request.assert_not_called();self.m.alert.assert_called_once_with(ONE,'location_unconfirmed')
  def test_busy_request_does_not_read_or_queue_another_set(self):
   s=self.start();self.m._state(ONE,'busy','connecting');self.guard.tick(ONE,s)
   s['reader'].read.assert_not_called();self.m._request.assert_not_called()

@@ -9,6 +9,9 @@ class ReadbackError(RuntimeError):pass
 class IdentityMismatch(ReadbackError):pass
 class StaleLocation(ReadbackError):pass
 
+READ_TIMEOUT=15
+REFRESH_INTERVAL=60
+
 def sample(value,pin,now=None):
     now=time.time() if now is None else now
     if not isinstance(value,dict) or value.get('locationSchema')!=1:raise ReadbackError('手机控件尚不支持带时间的定位读回，请在连接与签名中更新控制组件。')
@@ -35,7 +38,7 @@ def distance_m(a,b):
     return 6371008.8*2*math.asin(math.sqrt(min(1,max(0,h))))
 
 class LocationReader:
-    def __init__(self):self.bindings={};self.lock=threading.Lock()
+    def __init__(self):self.bindings={};self.lock=threading.Lock();self.refreshed={};self.heartbeats={};self.recoveries={};self.cancel=None
     def session(self,udid,required=True):
         try:
             state=json.loads((dm.device_dir(udid)/'active-session.json').read_text());caps=state['capabilities'];sid=state['sessionId']
@@ -99,9 +102,75 @@ class LocationReader:
         dm.coredevice(['device','process','launch','--device',udid,record['bundle_id']])
         cn.checked(url,pin)
         return cn.get(url,'/wda/device/location',timeout=4,max_bytes=16384)
+    def read_endpoint(self,udid):
+        """Resolve locally; the location response itself must prove the pinned identity.
+
+        Status/device-info snapshots queue behind XCTest searches. Requiring both on
+        every tick used to time out before even asking CoreLocation for a sample.
+        """
+        cfg=cn.load(udid)
+        if cfg['mode']=='usb':
+            try:
+                state=json.loads((dm.device_dir(udid)/'active-session.json').read_text())
+                caps=state['capabilities']
+                if caps.get('udid',caps.get('appium:udid'))!=udid:raise IdentityMismatch('控制会话设备标识不匹配。')
+                ports=json.loads((dm.DATA/'ports.json').read_text())[udid.lower()]
+                url=f"http://127.0.0.1:{int(ports['wda'])}"
+            except ReadbackError:raise
+            except (OSError,KeyError,ValueError,TypeError):raise ReadbackError('USB 控制接口未就绪，请先验证此设备连接。') from None
+            with self.lock:old=self.bindings.get(udid)
+            if not old or old[0]!=url:return self.endpoint(udid)
+            pin=old[1]
+        else:
+            try:
+                url=cfg['wda_url'] if cfg['mode']=='remote' else json.loads((dm.device_dir(udid)/'network-runtime.json').read_text())['url']
+                pin=cfg['fingerprint']
+                if not isinstance(pin,str) or not pin:raise ValueError()
+            except (OSError,KeyError,ValueError,TypeError):raise ReadbackError('无线定位接口未就绪，等待控制连接恢复。') from None
+        cn.validate_url(url)
+        with self.lock:self.bindings[udid]=(url,pin)
+        return url,pin
+    def refresh(self,udid,url,pin):
+        """Restart only CoreLocation updates, never the runner or simulated GPS."""
+        now=time.monotonic()
+        if now-self.refreshed.get(udid,-REFRESH_INTERVAL)<REFRESH_INTERVAL:return
+        self.refreshed[udid]=now
+        opener=build_opener(ProxyHandler({}),cn.NoRedirect())
+        request=Request(url+'/wda/device/location/stop',data=json.dumps({'deviceFingerprint':pin}).encode(),headers={'Content-Type':'application/json'},method='POST')
+        with opener.open(request,timeout=READ_TIMEOUT) as response:response.read(16384)
+        # Re-create the reader immediately; the next tick waits for a genuine fix.
+        value=cn.get(url,'/wda/device/location',timeout=READ_TIMEOUT,max_bytes=16384)
+        if not isinstance(value,dict) or value.get('deviceFingerprint')!=pin:raise IdentityMismatch('定位读回设备不匹配，已停止自动纠偏。')
     def read(self,udid):
-        url,pin=self.endpoint(udid)
-        return sample(cn.get(url,'/wda/device/location',timeout=4,max_bytes=16384),pin)
+        url,pin=self.read_endpoint(udid)
+        try:value=cn.get(url,'/wda/device/location',timeout=READ_TIMEOUT,max_bytes=16384)
+        except OSError:
+            if not self.recover(udid):raise
+            url,pin=self.read_endpoint(udid)
+            value=cn.get(url,'/wda/device/location',timeout=READ_TIMEOUT,max_bytes=16384)
+        try:observed=sample(value,pin)
+        except StaleLocation:
+            self.refresh(udid,url,pin)
+            raise
+        # Keep an idle Appium session alive, but never make its slow response a
+        # prerequisite for receiving an identity-checked CoreLocation sample.
+        if time.monotonic()-self.heartbeats.get(udid,-60)>=60:
+            self.heartbeats[udid]=time.monotonic();self.session(udid,required=False)
+        return observed
+    def recover(self,udid):
+        """Reopen an idle phone's existing controller, never compete with a task."""
+        now=time.monotonic()
+        if now-self.recoveries.get(udid,-60)<60:return False
+        self.recoveries[udid]=now
+        if cn.load(udid)['mode']!='wifi':return False
+        from app_paths import lock_device
+        try:ownership=lock_device(udid)
+        except RuntimeError:return False  # The browsing runner owns reconnects.
+        try:
+            if self.cancel is not None and self.cancel.is_set():return False
+            self.prepare(udid,self.cancel)
+            return True
+        finally:ownership.close()
     def stop(self,udid):
         with self.lock:binding=self.bindings.pop(udid,None)
         if not binding:return

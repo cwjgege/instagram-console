@@ -56,6 +56,12 @@ class LocationManager:
             self._request(udid,{'action':'set','udid':udid,'latitude':lat,'longitude':lon})
             if keep:self.guard.start(udid,(lat,lon))
     def stop_guard(self,udid):self.guard.stop(udid)
+    def alert(self,udid,event):
+        from notifications import TaskAlerts
+        try:cfg=json.loads((dm.device_dir(udid)/'config.json').read_text())
+        except (OSError,ValueError):cfg={}
+        name=cfg.get('device_alias') or cfg.get('device_name') or 'iPhone'
+        TaskAlerts(dm.device_dir(udid),name).handle('location-'+str(time.time()),{'event':event})
     def clear(self,udid):
         validate_target(udid)
         with self.lock:

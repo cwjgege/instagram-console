@@ -2,7 +2,7 @@ import sys,json,tempfile,unittest
 from pathlib import Path
 from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path('src').resolve()))
-from runner import Runner,NavigationLost,TransportLost,Halt
+from runner import Runner,NavigationLost,TransportLost,Halt,SearchTimedOut
 from page_state import PageBlocked
 CFG=json.loads(Path('src/default-config.json').read_text())
 class SearchFallback(unittest.TestCase):
@@ -12,6 +12,8 @@ class SearchFallback(unittest.TestCase):
   self.r=Runner({**CFG,'enable_search':True,'runtime_dir':self.tmp.name,'max_searches_per_run':10},notify=self.events.append)
   self.r.rng=Mock();self.r.rng.uniform.side_effect=lambda a,b:a;self.r.diagnose=Mock()
   self.r.return_from_search=Mock(side_effect=lambda:self.advance(12));self.r.recover_connection=Mock(side_effect=lambda:self.advance(20))
+  self.r.control_available=Mock(return_value=False)
+  self.r.wait_for_page_response=Mock()
  def advance(self,seconds):self.now+=seconds
  def fail(self,term):self.r.search_attempts+=1;raise NavigationLost('search navigation failed')
  def test_recovers_then_cools_down_before_next_search_and_resets_on_success(self):
@@ -20,11 +22,31 @@ class SearchFallback(unittest.TestCase):
   self.assertFalse(r.search_optional('AI'));r.search.assert_called_once()
   self.now=1191;self.assertFalse(r.search_ready());self.now=1192
   r.search=Mock();self.assertTrue(r.search_optional('AI'));self.assertEqual(r.search_consecutive_failures,0);self.assertIsNone(r.search_retry_at)
- def test_transport_failure_recovers_connection_instead_of_clicking_dead_session(self):
+ def test_read_timeout_attempts_safe_return_before_reconnecting(self):
   r=self.r;r.search=Mock(side_effect=TransportLost('lost'))
-  self.assertFalse(r.search_optional('AI'));r.recover_connection.assert_called_once();r.return_from_search.assert_not_called();self.assertEqual(r.search_retry_at,1200)
+  self.assertFalse(r.search_optional('AI'));r.recover_connection.assert_not_called();r.return_from_search.assert_called_once();self.assertEqual(r.search_retry_at,1192)
+ def test_timeout_with_live_control_returns_to_feed_and_cools_down(self):
+  for exc in (SearchTimedOut('budget'),TransportLost('read timeout'),TimeoutError('slow read')):
+   with self.subTest(exc=type(exc).__name__):
+    r=self.r;r.search=Mock(side_effect=exc);r.search_retry_at=None;r.search_consecutive_failures=0
+    r.feature_state['search']={'enabled':True,'reason':''};r.return_from_search.reset_mock()
+    def probe():self.assertIsNone(r.search_deadline);self.assertIsNone(r.search_overall_deadline);return True
+    r.control_available.side_effect=probe
+    self.assertFalse(r.search_optional('AI'));r.return_from_search.assert_called_once();r.recover_connection.assert_not_called()
+    self.assertIsNotNone(r.search_retry_at)
+ def test_return_read_timeout_rechecks_live_channel_before_navigation_retry(self):
+  r=self.r;r.search=Mock(side_effect=self.fail);r.control_available.return_value=True
+  r.return_from_search.side_effect=[TransportLost('read timeout'),None]
+  self.assertFalse(r.search_optional('AI'));self.assertEqual(r.return_from_search.call_count,2);r.recover_connection.assert_not_called()
+ def test_persistent_unreadable_page_with_live_channel_does_not_rebuild_connection(self):
+  r=self.r;r.search=Mock(side_effect=self.fail);r.control_available.return_value=True
+  r.return_from_search.side_effect=TransportLost('read timeout')
+  r.wait_for_page_response.side_effect=[None,Halt('manual stop')]
+  with self.assertRaises(Halt):r.search_optional('AI')
+  r.recover_connection.assert_not_called();self.assertEqual(r.return_from_search.call_count,2)
  def test_return_navigation_connection_loss_also_reconnects(self):
-  r=self.r;r.search=Mock(side_effect=self.fail);r.return_from_search.side_effect=TransportLost('lost')
+  r=self.r;r.search=Mock(side_effect=self.fail);r.return_from_search.side_effect=[TransportLost('lost'),None]
+  r.wait_for_page_response.side_effect=lambda:r.recover_connection()
   self.assertFalse(r.search_optional('AI'));r.recover_connection.assert_called_once()
  def test_failed_recovery_propagates_for_task_error_notification(self):
   r=self.r;r.search=Mock(side_effect=self.fail);r.return_from_search.side_effect=RuntimeError('cannot return')

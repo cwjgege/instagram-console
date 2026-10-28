@@ -44,7 +44,6 @@
   "max_likes_per_day": 4,
   "max_saves_per_day": 2,
   "max_searches_per_run": 2,
-  "max_swipes_per_run": 120,
   "review_candidates_per_run": 4,
   "relevance_terms": [
     "ai video",

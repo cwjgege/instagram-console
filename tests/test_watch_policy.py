@@ -70,10 +70,17 @@ class Watching(unittest.TestCase):
   r,clock=self.scenario(itertools.repeat(50))
   with clock:r.watch_video({'key':'clip','progress':50},True)
   self.assertGreaterEqual(self.now-100,30);self.assertLess(self.now-100,33);self.assertEqual(self.events[-1]['event'],'watch_stalled')
- def test_read_failure_routes_to_connection_recovery_instead_of_waiting_forever(self):
-  r,clock=self.scenario(iter([]));r.read_reel.side_effect=WatchBudgetExpired()
-  with clock,self.assertRaises(TransportLost):r.watch_video({'key':'clip','progress':50},True)
-  self.assertIsNone(r.watch_read_deadline)
+ def test_read_failure_does_not_require_health_probe_before_trying_a_swipe(self):
+  r,clock=self.scenario(iter([]));r.read_reel.side_effect=WatchBudgetExpired();r.control_available=Mock(return_value=False)
+  with clock:self.assertIs(r.watch_video({'key':'clip','progress':50},True),True)
+  self.assertIsNone(r.watch_read_deadline);r.control_available.assert_not_called()
+ def test_slow_progress_with_live_control_skips_video_without_reconnecting(self):
+  r,clock=self.scenario(iter([]));r.read_reel.side_effect=WatchBudgetExpired();r.recover_connection=Mock()
+  def probe():self.assertIsNone(r.watch_read_deadline);return True
+  r.control_available=Mock(side_effect=probe)
+  with clock:self.assertIs(r.watch_video({'key':'clip','progress':50},True),True)
+  self.assertTrue(r.video_watch['done']);r.recover_connection.assert_not_called()
+  self.assertEqual(self.events[-1]['event'],'watch_progress_skipped')
  def test_manual_stop_remains_effective_during_long_related_watch(self):
   from runner import Halt
   r,clock=self.scenario(itertools.repeat(50));r.stop.set();r.wait=Runner.wait.__get__(r,Runner)
