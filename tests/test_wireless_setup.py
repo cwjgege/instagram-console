@@ -25,6 +25,16 @@ class WirelessSetup(unittest.TestCase):
  def test_failed_location_check_preserves_original_connection(self):
   with patch.object(ws,'wired',return_value=False),patch.object(ws,'helper',side_effect=RuntimeError('location unavailable')),patch.object(ws.cn,'save') as save,self.assertRaises(RuntimeError):ws.verify(ONE)
   save.assert_not_called()
+ def test_network_discovery_delay_retries_before_switching(self):
+  info={'fingerprint':'phone-one','bundle':'com.igconsole.wda.example','ios':'27.0.1'}
+  missing=RuntimeError('DeviceNotFoundError: Device not found: usbmux has no device matching udid over Network')
+  with patch.object(ws,'wired',return_value=False),patch.object(ws,'helper',side_effect=[missing,None]) as helper,patch.object(ws.cn,'load',return_value={'mode':'usb'}),patch.object(ws.cn,'ensure_wifi',return_value='http://192.168.1.2:8100'),patch.object(ws.cn,'inspect',return_value=info),patch.object(dm,'signing_record',return_value={'bundle_id':'com.igconsole.wda.example.xctrunner'}),patch.object(ws.cn,'save') as save,patch('threading.Event.wait',return_value=False):
+   self.assertEqual(ws.verify(ONE)['status'],'verified');self.assertEqual(helper.call_count,2);save.assert_called_once()
+ def test_network_discovery_timeout_explains_and_preserves_connection(self):
+  missing=RuntimeError('DeviceNotFoundError: Device not found: usbmux has no device matching udid over Network')
+  with patch.object(ws,'wired',return_value=False),patch.object(ws,'helper',side_effect=missing),patch.object(ws.time,'monotonic',side_effect=[0,31]),patch.object(ws.cn,'save') as save,self.assertRaisesRegex(RuntimeError,'未在无线网络发现'):
+   ws.verify(ONE)
+  save.assert_not_called();self.assertIn('无需重签名',ws.state(ONE)['message'])
  def test_cancellation_never_switches_mode(self):
   stop=threading.Event();stop.set()
   with patch.object(ws.cn,'save') as save,self.assertRaisesRegex(RuntimeError,'取消'):ws.verify(ONE,stop)

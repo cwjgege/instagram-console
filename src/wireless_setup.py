@@ -46,7 +46,21 @@ def _verify(udid,stop=None,notify=lambda text:None):
         if stop.is_set():raise RuntimeError('已取消无线验证，连接方式未切换。')
         if wired(udid):raise RuntimeError('请先拔掉 USB，才能验证实际 Wi-Fi 连接。')
     try:
-        check();notify('正在验证拔线后的无线定位通道…');helper(udid,'--check-wireless');check()
+        check();notify('正在验证拔线后的无线定位通道…')
+        deadline=time.monotonic()+30
+        while True:
+            try:
+                helper(udid,'--check-wireless');break
+            except RuntimeError as exc:
+                text=str(exc).casefold()
+                missing=('devicenotfounderror' in text or 'device not found' in text) and ('usbmux' in text or 'over network' in text)
+                if not missing:raise
+                check()
+                if time.monotonic()>=deadline:
+                    raise RuntimeError('拔掉 USB 后，电脑暂未在无线网络发现这台手机。签名安装结果不受此检查影响。请插回 USB，确认手机解锁、两端连接同一 Wi-Fi 且网络允许设备互相发现，再点击“准备无线连接（无需重签名）”；仍失败时查看无线诊断日志。') from exc
+                notify('正在等待手机出现在无线设备列表中，最多约 30 秒…')
+                stop.wait(3);check()
+        check()
         notify('正在验证无线控制组件…')
         old=cn.load(udid);setting={'mode':'wifi','identifier_kind':'udid'}
         if old.get('mode')=='wifi' and old.get('fingerprint'):setting['fingerprint']=old['fingerprint']
