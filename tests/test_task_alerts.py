@@ -4,6 +4,11 @@ from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path('src').resolve()))
 from notifications import TaskAlerts,deliver
 class Alerts(unittest.TestCase):
+ def test_recognized_signing_failure_gives_safe_specific_guidance(self):
+  with tempfile.TemporaryDirectory() as root:
+   event=threading.Event();send=Mock(side_effect=lambda *args:event.set());alerts=TaskAlerts(root,'phone',send)
+   self.assertTrue(alerts.handle(1,{'event':'error','error_code':'device_limit','message':'private token'}));self.assertTrue(event.wait(2))
+   self.assertIn('设备名额已满',send.call_args.args[2]);self.assertNotIn('private',str(send.call_args))
  def test_duplicate_error_is_alerted_once_and_new_run_can_alert(self):
   with tempfile.TemporaryDirectory() as root:
    event=threading.Event();send=Mock(side_effect=lambda *args:event.set());alerts=TaskAlerts(root,'test-phone',send)

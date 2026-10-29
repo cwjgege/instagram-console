@@ -7,6 +7,9 @@ import device_manager as dm
 from setup_errors import SetupError,classify_setup_error,log_positions,attempt_text
 
 class FailureClassification(unittest.TestCase):
+ def test_device_limit_wins_over_secondary_build_and_expired_profile_errors(self):
+  issue=classify_setup_error(RuntimeError('xcodebuild failed code 65'),'Your development team has reached the maximum number of registered iPhone devices.\nprovisioning profile has expired\n** TEST BUILD FAILED **')
+  self.assertEqual(issue.code,'device_limit');self.assertIn('名额已满',str(issue));self.assertIn('不会立即释放',str(issue))
  def test_exact_trust_rejection_wins_over_secondary_tool_error(self):
   issue=classify_setup_error(RuntimeError('xcodebuild code 65'),'Developer App Certificate is not trusted. xcrun: error: unable to find utility devicectl')
   self.assertEqual(issue.code,'developer_untrusted');self.assertIn('重新验证',str(issue))

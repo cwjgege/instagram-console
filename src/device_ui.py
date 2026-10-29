@@ -51,6 +51,7 @@ class DeviceWindow:
         ttk.Label(body,text='签名团队（与手机 Apple ID 无需相同）').pack(anchor='w',pady=(16,5))
         self.team=tk.StringVar();self.team_box=ttk.Combobox(body,textvariable=self.team)
         self.team_box.pack(fill='x')
+        ttk.Button(body,text='查看本机描述文件中的设备',command=self.show_cached_profiles).pack(anchor='w',pady=(6,0))
         ttk.Label(body,text='检测不到团队时：在 Xcode → Settings → Accounts 登录开发账号，\n完成证书配置后重新检测；也可输入该账号的 10 位 Team ID。',wraplength=710).pack(anchor='w',pady=(6,12))
         self.auto_wireless=tk.BooleanVar(value=True)
         self.wireless_check=ttk.Checkbutton(body,text='组件就绪后自动准备无线连接，拔线后验证并切换 Wi-Fi',variable=self.auto_wireless)
@@ -153,7 +154,9 @@ class DeviceWindow:
             self.signature.set('配置阶段：'+pending.get('stage','未完成')+' · '+message)
         if record:
             if hasattr(self,'verify_button') and not self.busy and state not in ('unknown','expired'):self.verify_button.configure(state='normal')
-            team=record['team_id'];self.team.set(next((label for label,value in self.team_map.items() if value==team),team))
+            if getattr(self,'team_device',None)!=device['udid']:
+                team=record['team_id'];self.team.set(next((label for label,value in self.team_map.items() if value==team),team))
+        self.team_device=device['udid']
 
     def begin_add(self,device):
         store=self.panel.__dict__.get('store')
@@ -270,6 +273,30 @@ class DeviceWindow:
         try:subprocess.Popen(['/usr/bin/open',str(dm.xcode_directory().parent.parent)])
         except RuntimeError:subprocess.Popen(['/usr/bin/open','macappstore://apps.apple.com/app/id497799835'])
 
+    def show_cached_profiles(self):
+        if self.busy:return
+        team=self.team_map.get(self.team.get(),self.team.get().strip())
+        def job():self.events.put(('cached_profiles',(team,dm.cached_team_profiles(team))))
+        self.status.set('正在读取本机 Xcode 描述文件…');self.task(job)
+
+    def display_cached_profiles(self,team,profiles):
+        from datetime import datetime
+        names={d['udid'].casefold():d.get('name','iPhone')+' · '+d.get('model','型号未知') for d in self.devices}
+        lines=['团队 '+team+' 的本机描述文件记录',
+               '这些是文件中包含的设备，并非 Apple 当前注册名额清单。文件到期时间不代表设备注册到期时间。']
+        if not profiles:lines.append('\n没有找到该团队含设备的本机描述文件；不能据此判断名额是否已满。')
+        for profile in profiles:
+            expires=datetime.fromisoformat(profile['expires_at']).astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')
+            lines.append('\n描述文件到期：'+expires)
+            for udid in profile['devices']:lines.append('  '+udid+'  ·  '+names.get(udid.casefold(),'名称和型号未确认'))
+        dialog=tk.Toplevel(self.window);dialog.title('本机描述文件设备记录');dialog.geometry('700x440')
+        frame=ttk.Frame(dialog,padding=16);frame.pack(fill='both',expand=True)
+        view=tk.Text(frame,wrap='word',height=15);scroll=ttk.Scrollbar(frame,orient='vertical',command=view.yview)
+        view.configure(yscrollcommand=scroll.set);scroll.pack(side='right',fill='y');view.pack(fill='both',expand=True)
+        view.insert('1.0','\n'.join(lines));view.configure(state='disabled')
+        ttk.Button(dialog,text='关闭',command=dialog.destroy).pack(pady=(0,12))
+        self.status.set('已读取本机描述文件。')
+
     def open_logs(self):
         device=self.selected();folder=dm.device_dir(device['udid']) if device else DATA
         folder.mkdir(parents=True,exist_ok=True);subprocess.Popen(['/usr/bin/open',str(folder)])
@@ -301,6 +328,7 @@ class DeviceWindow:
                     if dm.expiry_state(record,self.panel.cfg.get('signature_warn_hours',48))[0]=='soon':
                         self.status.set('重新签名安装已完成，但有效期仍临近到期。请在 Xcode 更新证书或描述文件后重试。')
                 elif event=='wireless_prepared':self.wait_for_unplug(value)
+                elif event=='cached_profiles':self.display_cached_profiles(*value)
                 elif event=='wireless_failed':
                     self.last_result=value;self.status.set(value)
                 elif event=='wireless_unplugged':

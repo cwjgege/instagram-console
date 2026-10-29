@@ -31,6 +31,15 @@ class TaskAlerts:
               'resume_blocked':'手机页面或连接尚未就绪，任务保持暂停。',
               'location_unconfirmed':'位置读回持续无效或设备校验失败，无法保证仍在所选位置。请打开固定定位窗口检查。',
               'location_recovered':'已收到新鲜位置样本，确认回到所选位置范围。'}[event]
+        if event=='error':
+            known={
+                'device_limit':'签名团队设备名额已满。请打开设备配置，换用有空余名额的团队或等待旧注册到期。',
+                'signature_invalid':'控制组件签名已失效。请打开设备配置检查签名，再重新安装。',
+                'developer_untrusted':'手机尚未信任或验证控制组件。请打开设备配置查看处理步骤。',
+                'network_validation':'手机尚未完成 Apple 在线验证。请打开设备配置查看处理步骤。',
+                'signing_account_missing':'所选团队的账号未在本机 Xcode 中就绪。请打开设备配置检查账号。',
+            }
+            body=known.get(row.get('error_code'),body)
         try:
             try:history=json.loads(self.path.read_text())
             except (OSError,ValueError):history=[]

@@ -233,6 +233,27 @@ def signing_teams():
         except (ValueError,ssl.SSLError):continue
     return teams
 
+def cached_team_profiles(team, home=None):
+    """Read local Xcode profiles only; these do not establish live Apple registrations."""
+    if not re.fullmatch('[A-Z0-9]{10}',team):raise ValueError('请选择有效的签名团队。')
+    home=Path.home() if home is None else Path(home)
+    folders=[home/'Library/Developer/Xcode/UserData/Provisioning Profiles',home/'Library/MobileDevice/Provisioning Profiles']
+    profiles=[]
+    for folder in folders:
+        for path in folder.glob('*.mobileprovision'):
+            try:
+                result=subprocess.run(['/usr/bin/security','cms','-D','-i',str(path)],capture_output=True,timeout=10,check=True)
+                data=plistlib.loads(result.stdout)
+                if team not in data.get('TeamIdentifier',[]):continue
+                devices=data.get('ProvisionedDevices',[])
+                if not isinstance(devices,list) or not devices:continue
+                expiration=data.get('ExpirationDate')
+                if not isinstance(expiration,datetime):continue
+                if expiration.tzinfo is None:expiration=expiration.replace(tzinfo=timezone.utc)
+                profiles.append({'expires_at':expiration.isoformat(),'devices':[d for d in devices if isinstance(d,str)]})
+            except (OSError,ValueError,TypeError,subprocess.SubprocessError,plistlib.InvalidFileException):continue
+    return sorted(profiles,key=lambda p:p['expires_at'],reverse=True)
+
 def device_dir(udid):
     if not re.fullmatch('[A-Fa-f0-9-]{10,50}',udid):raise ValueError('设备标识无效，请重新检测')
     return DATA/'devices'/udid

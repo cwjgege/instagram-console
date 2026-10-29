@@ -29,6 +29,8 @@ def attempt_text(runtime,positions):
 def classify_setup_error(error,logs=''):
     if isinstance(error,SetupError):return error
     text=(str(error)+'\n'+logs).casefold()
+    if any(s in text for s in ('maximum number of registered iphone devices','maximum number of registered devices','maximum number of devices','device limit reached','reached the maximum number of registered')):
+        return SetupError('device_limit','所选 Apple 签名团队的设备注册名额已满，本次未完成签名安装。请在下方切换到有空余名额的团队，或等待旧设备注册到期后重试。删除本机设备记录或证书不会立即释放名额；本机描述文件不能证明 Apple 当前名额状态。','签名')
     if 'invalid trust settings' in text and 'restore system default' in text:
         return SetupError('certificate_trust','Mac 开发证书的信任设置无效。请在钥匙串访问中双击本次 Apple Development 证书，将“使用此证书时”恢复为“使用系统默认值”，保存后重试；不要设为“始终信任”。','签名')
     if 'unable to find a device matching the provided destination' in text:

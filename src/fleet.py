@@ -143,7 +143,7 @@ class Fleet:
         elif self.errors.get(udid) or cfg.get('_load_error') or (detail.startswith('已停止：')):state,tag='需要处理','error'
         elif not online:state,tag='设备未连接','pending'
         elif not ready:state,tag='检查连接','pending'
-        elif mode!='remote' and setup and setup.get('status')!='ready':state,tag='等待手机信任' if setup.get('status')=='awaiting_trust' else '配置未完成','pending'
+        elif mode!='remote' and setup and setup.get('status')!='ready':state,tag=('设备名额已满' if setup.get('code')=='device_limit' else '等待手机信任' if setup.get('status')=='awaiting_trust' else '配置未完成'),'pending'
         elif signature in ('unknown','expired'):state,tag='待配置' if signature=='unknown' else '签名已到期','pending'
         elif signature=='soon':state,tag='签名即将到期','pending'
         else:state,tag='已就绪','idle'
@@ -193,7 +193,7 @@ class Fleet:
         self.connection_button.configure(state='disabled' if self.closing or item[1]['alive'] else 'normal')
         cfg,v=item;self.detail_title.set(display_name(cfg))
         self.detail_meta.set('iOS '+cfg.get('device_ios','未知')+'   ·   当前控制：'+(connections.MODES[v['mode']]+' 已就绪' if v['ready'] else '连接检测中' if self.scanning else connections.MODES[v['mode']]+' 未就绪')+'   ·   '+{'valid':'签名有效','soon':'签名即将到期','expired':'签名已到期','unknown':'尚未完成签名','external':'远端签名需当地维护'}[v['signature']])
-        identity='原名：'+cfg.get('device_original_name',cfg.get('device_name','iPhone'))+'  ·  编号末尾 '+udid[-8:]
+        identity='原名：'+cfg.get('device_original_name',cfg.get('device_name','iPhone'))+'  ·  设备 UDID 末尾 '+udid[-8:]
         physical='USB 已插入' if normalized(udid) in self.__dict__.get('usb_ids',set()) else 'USB 未插入'
         self.detail_meta.set(identity+'\n'+physical+'  ·  '+self.detail_meta.get())
         self.detail_status.set(v['detail']);self.detail_label.configure(foreground=ui.RED if v['tag']=='error' else ui.INK)
@@ -250,7 +250,7 @@ class Fleet:
         blocked=self.removal_blocker(udid)
         if blocked:self.status.set('无法删除：'+blocked);return
         cfg=self._view_cache[udid][0]
-        prompt=(display_name(cfg)+' · 编号末尾 '+udid[-8:]+
+        prompt=(display_name(cfg)+' · 设备 UDID 末尾 '+udid[-8:]+
                 '\n将清除此设备在本机的配置、连接绑定、签名记录、编译缓存和日志，并移至系统废纸篓。'+
                 '\n不会卸载手机组件或删除共享证书。再次手动添加时需要重新配置。')
         if not messagebox.askokcancel('删除设备',prompt,icon='warning',parent=self.root):return

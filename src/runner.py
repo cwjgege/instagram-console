@@ -1632,7 +1632,7 @@ class Runner:
             self.diagnose('fatal',e)
             status='error'
             message='手机控制连接中断，当前动作结果未确认，已停止且不会重发' if transport_error(e) else (str(e) or type(e).__name__)
-            self.log('error',message=message,detail=str(e)[:1800])
+            self.log('error',message=message,detail=str(e)[:1800],error_code=e.code if isinstance(e,SetupError) else '')
         finally:
             self.pause_enabled=False
             if self.managed and self.path:
