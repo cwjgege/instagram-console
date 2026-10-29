@@ -58,7 +58,7 @@ def _verify(udid,stop=None,notify=lambda text:None):
                 check()
                 if time.monotonic()>=deadline:
                     raise RuntimeError('拔掉 USB 后，电脑暂未在无线网络发现这台手机。签名安装结果不受此检查影响。请插回 USB，确认手机解锁、两端连接同一 Wi-Fi 且网络允许设备互相发现，再点击“准备无线连接（无需重签名）”；仍失败时查看无线诊断日志。') from exc
-                notify('正在等待手机出现在无线设备列表中，最多约 30 秒…')
+                notify('正在等待手机出现在无线设备列表中…')
                 stop.wait(3);check()
         check()
         notify('正在验证无线控制组件…')
