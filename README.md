@@ -1,10 +1,14 @@
 # Instagram 控制台
 
+1.2.35 改善 XCTest 控制通道故障处理：识别 IDE 断开与测试进程退出码 74，避免误报 USB 信任问题。本地 Wi-Fi 控制启动时清理本软件拥有的所选设备进程，等待退出后仅重试一次；同一设备的启动串行执行，取消可中止重试。重试不重新签名、不重放社交操作。仍失败时提示重启手机、重新打开 Xcode 并通过 USB 验证已有组件，连接诊断记录错误分类和重试信息。此版本不能代替手机重启，也未在原故障设备上完成新的实测。
+
 1.2.33 测试版将读取超时与控制失效分开：进度读取失败后只尝试一次翻页，通过视频控件标识核对；滑动回包超时时只等待读回，不重复发送。搜索异常优先安全返回，页面与不同控制检查连续失败后才重连。
 
-面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.34**。
+面向 Apple Silicon Mac 的 iPhone 多设备控制桌面应用，支持 USB 与已验证的网络 WDA。源码版本 **1.2.35**。
 
-验证范围：554 项自动测试、安装包自检、单次超时翻页实测通过；运行中一次实际进度超时也已成功切页且未重连。最新长测在 9 分 26 秒时因第二轮搜索无法确认 Instagram 前台、返回视频页失败而停止，尚未通过两小时稳定性验证；定位持续读回和无线恢复也不能保证始终可用。
+1.2.35 验证：571 项自动测试、打包运行环境自检、应用签名和启动检查通过；原故障设备尚未重新实测。
+
+此前实测中，单次超时翻页通过；运行中一次实际进度超时也已成功切页且未重连。此前最新长测在 9 分 26 秒时因第二轮搜索无法确认 Instagram 前台、返回视频页失败而停止，尚未通过两小时稳定性验证；定位持续读回和无线恢复也不能保证始终可用。
 
 1.2.31 取消每轮翻页次数上限，包括旧配置保存的上限。翻页统计继续显示，任务按所设运行时长结束；手动停止及故障停止仍有效。
 
@@ -12,9 +16,11 @@
 
 ## 下载与安装
 
-[下载 v1.2.33 读取超时降级与单次翻页测试版](https://github.com/cwjgege/instagram-console/releases/download/v1.2.33/Instagram-Console-1.2.33-AppleSilicon.dmg)
+[下载 v1.2.35 XCTest 连接恢复测试版（DMG）](https://github.com/cwjgege/instagram-console/releases/download/v1.2.35/Instagram-Console-1.2.35-AppleSilicon.dmg)
 
-[查看 v1.2.33 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.33)
+[下载 v1.2.35 ZIP 安装包](https://github.com/cwjgege/instagram-console/releases/download/v1.2.35/Instagram-Console-1.2.35-AppleSilicon.zip)
+
+[查看 v1.2.35 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.35)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 

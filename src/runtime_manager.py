@@ -78,6 +78,12 @@ class ExistingProcess:
     def poll(self):
         try:os.kill(self.pid,0);return None
         except ProcessLookupError:return 0
+    def wait(self,timeout=None):
+        deadline=None if timeout is None else time.monotonic()+timeout
+        while self.poll() is None:
+            if deadline is not None and time.monotonic()>=deadline:raise subprocess.TimeoutExpired(str(self.pid),timeout)
+            time.sleep(.05)
+        return 0
 
 def _stop(key):
     entry=_PROCESSES.pop(key,None)

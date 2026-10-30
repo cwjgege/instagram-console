@@ -47,6 +47,8 @@ def startup_failure(log,returncode):
         if re.match(r'^(?:[\w.]+(?:Error|Exception)|(?:[\w.]+\.)?IdentityMismatch):',line):detail=line[:1200];break
     detail=detail or '未收到可用的控件核验结果，请查看 controller-wireless.log。'
     if 'IdentityMismatch:' in detail:return cn.FingerprintMismatch('独立无线通道身份核验失败，未继续重连：'+detail)
+    issue=cn.classify_setup_error(RuntimeError('XCTest 启动失败'),'\n'.join(lines))
+    if issue.code=='automation_startup':return issue
     if 'ConnectionTerminatedError' in detail:detail+='；XCTest 测试进程在完成启动前断开，请保留本次启动日志；这不代表开发者模式未开启。'
     return ControllerStartupError('独立无线通道启动失败（退出码 '+str(returncode)+'）：'+detail)
 

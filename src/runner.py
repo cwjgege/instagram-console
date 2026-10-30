@@ -83,6 +83,7 @@ class ControlHTTPError(RuntimeError):
         super().__init__(message);self.status=status;self.kind=kind;self.empty=empty
 
 def transport_error(exc):
+    if isinstance(exc,SetupError):return False
     if isinstance(exc,ControlHTTPError):
         if exc.status in (502,503,504) or (exc.status>=500 and exc.empty) or exc.kind=='invalid session id':return True
     text=str(exc).casefold()

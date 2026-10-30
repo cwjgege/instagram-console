@@ -3,6 +3,7 @@ import ipaddress,json,re,subprocess,threading,time,plistlib,fcntl
 import hashlib
 from contextlib import ExitStack
 from pathlib import Path
+from setup_errors import SetupError,classify_setup_error
 from urllib.parse import urlsplit
 from urllib.request import build_opener,ProxyHandler,Request,HTTPRedirectHandler
 
@@ -286,6 +287,11 @@ def stop_device(udid):
         import os,signal
         try:os.killpg(process.pid,signal.SIGTERM)
         except ProcessLookupError:pass
+        try:process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:os.killpg(process.pid,signal.SIGKILL)
+            except ProcessLookupError:pass
+            process.wait(timeout=5)
 
 def stop_all():
     for udid in list(_PROCESSES):stop_device(udid)
@@ -294,7 +300,7 @@ def record_connection_failure(udid,trace,error):
     """Keep bounded transport evidence without collecting app contents or proxy credentials."""
     import device_manager as dm
     from app_paths import APP_VERSION
-    evidence={**trace,'app_version':APP_VERSION,'timestamp':time.time(),'error':str(error)[:2000],'routes':[]}
+    evidence={**trace,'app_version':APP_VERSION,'timestamp':time.time(),'error':str(error)[:2000],'error_code':getattr(error,'code',''),'routes':[]}
     for url in list(dict.fromkeys(trace.get('candidates',[])))[-3:]:
         try:
             validate_url(url);host=urlsplit(url).hostname
@@ -363,8 +369,28 @@ def wireless_ports(derived):
     return port,mjpeg
 
 def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
+    """Serialize this phone's startup; retry an explicit XCTest channel failure once."""
+    from runtime_manager import device_lock
     from runner import Halt
-    trace={'stage':'preflight','candidates':[]}
+    with device_lock(udid):
+        recovery={}
+        for attempt in range(2):
+            if stop is not None and stop.is_set():raise Halt('已手动停止')
+            try:
+                return _ensure_wifi_attempt(udid,notify,stop,setting_override,recovery)
+            except SetupError as exc:
+                if exc.code!='automation_startup' or attempt:raise
+                # The failed attempt stopped and waited for our own process.
+                # Never reboot the phone, change trust, or replay gestures here.
+                recovery={'recovery_attempt':1,'previous_error_code':exc.code,'previous_error':str(exc)[:1200]}
+                notify('XCTest 控制通道建立失败，已清理此设备由本软件启动的控制进程；保持手机解锁，2 秒后重新建立一次控制连接…')
+                if stop is not None:
+                    if stop.wait(2):raise Halt('已手动停止')
+                else:time.sleep(2)
+
+def _ensure_wifi_attempt(udid,notify,stop,setting_override,recovery):
+    from runner import Halt
+    trace={'stage':'preflight','candidates':[],**recovery}
     try:
         url=_ensure_wifi(udid,notify,stop,setting_override,trace)
         # Preserve candidate failures even if a later development tunnel succeeds.
@@ -378,7 +404,7 @@ def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
         stop_device(udid);raise
     except Exception as exc:
         stop_device(udid)
-        if trace.get('controller_channel_refused') or (isinstance(exc,IdentityProofUnavailable) and trace.get('transport')=='localNetwork'):
+        if (trace.get('controller_channel_refused') and not isinstance(exc,SetupError)) or (isinstance(exc,IdentityProofUnavailable) and trace.get('transport')=='localNetwork'):
             trace['fallback_reason']='paired_identity_unavailable' if isinstance(exc,IdentityProofUnavailable) else 'controller_channel_refused'
             notify('当前无线核验通道不可用，正在通过独立配对通道重新核验设备和签名；不会直接接受新指纹。')
             import controller_bridge
@@ -395,12 +421,16 @@ def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
             except Exception as fallback:
                 trace['fallback_error']=str(fallback)[:2000]
                 stop_device(udid);error_type=WirelessStartupUnavailable if isinstance(fallback,controller_bridge.ControllerStartupError) else RuntimeError
-                exc=error_type(str(exc)+'；备用无线通道：'+str(fallback))
+                exc=fallback if isinstance(fallback,SetupError) else error_type(str(exc)+'；备用无线通道：'+str(fallback))
+        if isinstance(exc,SetupError) and exc.code=='automation_startup' and recovery:
+            exc=SetupError(exc.code,'清理此设备控制进程并自动重试一次后仍未恢复。\n'+str(exc),exc.stage)
         # A diagnostic write failure must not replace the original connection error.
         try:path=record_connection_failure(udid,trace,exc)
         except Exception:raise exc
         import controller_bridge
         error_type=WirelessStartupUnavailable if isinstance(exc,(WirelessStartupUnavailable,controller_bridge.ControllerStartupError)) else RuntimeError
+        if isinstance(exc,SetupError):
+            raise SetupError(exc.code,str(exc)+'\n连接诊断：'+str(path),exc.stage) from exc
         raise error_type(str(exc)+'\n连接诊断：'+str(path)) from exc
 
 def _ensure_wifi(udid,notify,stop,setting_override,trace):
@@ -519,6 +549,10 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
             if 'is not installed' in recent:
                 trace['stage']='component_missing'
                 raise RuntimeError('手机未安装本机签名记录对应的控制组件（'+bundle+'）。请在“连接与签名”恢复该组件；若换过签名团队，需要核对实际安装标识。无需因此重复创建证书。')
+            issue=classify_setup_error(RuntimeError('XCTest 启动失败'),recent)
+            if issue.code=='automation_startup':
+                trace['stage']='automation_startup'
+                raise issue
             if trace['stage']=='wda_endpoint':raise RuntimeError('组件已报告启动，但控制端口未通过验证；请检查局域网直连，详情见 wireless-wda.log。')
             raise RuntimeError('已安装组件启动失败；请查看 wireless-wda.log 中的具体原因，不会自动覆盖安装或创建证书。')
         if stop is not None:stop.wait(1)

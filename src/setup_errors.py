@@ -9,7 +9,7 @@ class SetupError(RuntimeError):
 
 def log_positions(runtime):
     positions={}
-    for name in ('appium.log','legacy.log','device-setup.log'):
+    for name in ('appium.log','legacy.log','device-setup.log','wireless-wda.log','controller-wireless.log'):
         try:positions[name]=(Path(runtime)/name).stat().st_size
         except OSError:positions[name]=0
     return positions
@@ -61,6 +61,12 @@ def classify_setup_error(error,logs=''):
         return SetupError('device_support','Xcode 的设备支持环境未就绪或与手机系统不匹配。请在 Xcode → Window → Devices and Simulators 查看该手机并完成支持组件准备，再重新验证。','设备支持')
     if any(s in text for s in ('** test build failed **','** build failed **','fatal error:','compilation failed')):
         return SetupError('build_failed','控制组件编译失败，尚未完成安装。请查看本次 device-setup.log / appium.log 的首个编译错误；此时手机可能没有对应开发者信任项。','编译')
-    if any(s in text for s in ('unknown device or simulator udid','device is not connected','device disconnected','no device found','device not found','usbmux connection failed','econnreset','socket hang up','connection refused','连接中断','usb')):
+    if ('exiting due to ide disconnection' in text or
+        ('connection peer refused channel request' in text and 'xctestdriverinterface' in text) or
+        re.search(r'test runner exited with code 74\b',text)):
+        return SetupError('automation_startup','手机 XCTest 控制通道建立失败，测试进程在连接就绪前退出。请先停止此设备任务，重启这台 iPhone 并输入密码解锁；重新打开 Xcode 后，通过 USB 点击「重新验证已安装组件（不重新签名）」。若仍失败，请保留本次 wireless-wda.log、controller-wireless.log 和 appium.log 排查。此错误不能证明手机未信任电脑或签名失效。','启动验证')
+    if any(s in text for s in ('econnreset','socket hang up','connection refused','连接中断')):
+        return SetupError('connection','手机或控制服务通信未就绪。请保持手机解锁，检查当前 USB / Wi-Fi 连接并重新验证；这类通信错误不能证明未信任电脑。若 Finder 已能读取手机信息，请查看本次控制组件启动日志。','连接')
+    if any(s in text for s in ('unknown device or simulator udid','device is not connected','device disconnected','no device found','device not found','usbmux connection failed')):
         return SetupError('connection','手机或控制服务通信未就绪。请检查这台手机的 USB 数据连接、解锁和「信任此电脑」；重新检测后再验证。','连接')
     return SetupError('unknown','控制组件配置未完成，暂不能开始浏览。请打开诊断日志查看本次安装/启动错误；未检测到明确原因，不会自动重复安装。')

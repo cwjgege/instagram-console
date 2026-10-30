@@ -188,7 +188,8 @@ class LocalWirelessStartup(unittest.TestCase):
  def test_initialization_errors_are_specific_and_never_open_settings_after_exit(self):
   cases=[('BSErrorCodeDescription = Locked','device_locked','锁定状态'),
          ('Timed out while enabling automation mode.','automation_authorization','启用自动化超时'),
-         ('Failed to background test runner within 30.0s.','background_runner_failed','XCTest 10300')]
+         ('Failed to background test runner within 30.0s.','background_runner_failed','XCTest 10300'),
+         ('Connection peer refused channel request for XCTestDriverInterface. Exiting due to IDE disconnection.','automation_startup','重启这台 iPhone')]
   for message,stage,expected in cases:
    with self.subTest(stage=stage):
     process=Mock();process.poll.return_value=1
@@ -271,3 +272,17 @@ class WdaProtocol(unittest.TestCase):
   finally:server.shutdown();server.server_close();thread.join()
 
 if __name__=='__main__':unittest.main()
+
+class WirelessProcessCleanup(unittest.TestCase):
+ def test_stop_waits_for_only_selected_process_and_escalates_when_needed(self):
+  import subprocess,signal
+  process=Mock();process.pid=12345;process.poll.return_value=None
+  process.wait.side_effect=[subprocess.TimeoutExpired('xcodebuild',5),0]
+  other=Mock();cn._PROCESSES.update({'cleanup-phone':process,'untouched-phone':other})
+  try:
+   with patch('os.killpg') as kill:
+    cn.stop_device('cleanup-phone')
+   self.assertEqual(kill.call_args_list[0].args,(12345,signal.SIGTERM))
+   self.assertEqual(kill.call_args_list[1].args,(12345,signal.SIGKILL))
+   self.assertEqual(process.wait.call_count,2);other.poll.assert_not_called()
+  finally:cn._PROCESSES.pop('untouched-phone',None)

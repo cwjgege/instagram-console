@@ -376,7 +376,7 @@ def setup_attempt(device,team,job):
     except Exception as exc:
         issue=classify_setup_error(exc,attempt_text(runtime,positions))
         state={'status':'failed','code':issue.code,'stage':issue.stage,'message':str(issue),'updated_at':datetime.now(timezone.utc).isoformat()}
-        if issue.code in ('network_validation','developer_untrusted','signature_or_trust','locked','automation_timeout','connection','unknown'):
+        if issue.code in ('network_validation','developer_untrusted','signature_or_trust','locked','automation_timeout','automation_startup','connection','unknown'):
             if stage_installed_candidate(device,team):state['status']='awaiting_trust' if issue.code=='developer_untrusted' else 'awaiting_validation'
         try:pending=json.loads((runtime/'pending-setup.json').read_text());state['can_verify']=pending.get('team_id')==team
         except (OSError,ValueError,AttributeError):state['can_verify']=False
@@ -410,7 +410,7 @@ def _provision(device,team,notify):
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise RuntimeError('请先停止这台手机的浏览任务，再重新签名。')
         fresh=next((d for d in scan_devices() if d['udid']==device['udid']),None)
-        if not fresh:raise RuntimeError('所选 iPhone 未通过 USB 连接，请重新检测。')
+        if not fresh:raise SetupError('connection','所选 iPhone 未通过 USB 连接，请重新检测。','连接')
         validate_device(fresh)
         check_xcode()
         previous=signing_record(device['udid'])
