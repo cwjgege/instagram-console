@@ -252,6 +252,25 @@ class LocalWirelessStartup(unittest.TestCase):
   evidence=json.loads((self.runtime/'connection-diagnostic.json').read_text())
   self.assertEqual(evidence['stage'],'xctest_destination_missing');self.assertEqual(evidence['startup_method'],'xcodebuild-test-without-building')
 
+class SecurityLaunchPath(unittest.TestCase):
+ setUp=LocalWirelessStartup.setUp
+ tearDown=LocalWirelessStartup.tearDown
+ details=LocalWirelessStartup.details
+ def test_actual_native_security_log_is_classified_retried_and_does_not_poison_fresh_start(self):
+  launches=[];notifications=[]
+  def launch(*args,**kwargs):
+   process=Mock();launches.append(process)
+   message=('The application could not be launched because the Developer App Certificate is not trusted.\n** TEST EXECUTE FAILED **\n' if len(launches)==1 else 'ServerURLHere->http://192.168.31.216:18120<-ServerURLHere\n')
+   process.poll.return_value=1 if len(launches)==1 else None
+   kwargs['stdout'].write(message.encode());kwargs['stdout'].flush();return process
+  def inspect(url):
+   if len(launches)==2 and url=='http://192.168.31.216:18120':return {'fingerprint':'pin','name':'Test','ios':'17.6.1','bundle':'com.igconsole.test.xctrunner'}
+   raise OSError('not ready')
+  with patch.object(dm,'coredevice',return_value=self.details('fd00::1')) as details,patch.object(cn,'inspect',side_effect=inspect),patch.object(cn.subprocess,'Popen',side_effect=launch),patch.object(cn.subprocess,'run',return_value=Mock(returncode=0,stdout='')),patch.object(dm,'child_env',return_value={}),patch.object(dm,'xcode_directory',return_value=Path('/Xcode')),patch.object(cn.time,'sleep'),patch.object(dm,'provision') as sign:
+   self.assertEqual(cn.ensure_wifi(self.udid,notifications.append,setting_override={'mode':'wifi'}),'http://192.168.31.216:18120')
+  self.assertEqual(len(launches),2);self.assertEqual(details.call_count,2);sign.assert_not_called()
+  evidence=json.loads((self.runtime/'connection-attempt.json').read_text());self.assertTrue(evidence['recovery_succeeded']);self.assertEqual(evidence['previous_error_code'],'developer_untrusted')
+
 class WdaProtocol(unittest.TestCase):
  def test_read_only_verification_over_real_http_and_redirect_rejection(self):
   from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer

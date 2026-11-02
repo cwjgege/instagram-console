@@ -1,4 +1,5 @@
 {
+  "identity_observation_swipes": 10,
   "recovery_enabled": true,
   "recovery_attempts": 3,
   "recovery_run_limit": 5,

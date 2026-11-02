@@ -136,7 +136,7 @@ class DeviceWindow:
         if not device:
             self.detail.set('未检测到 USB iPhone。请连接、解锁、信任此电脑，然后重新检测。')
             self.signature.set('尚未配置设备。');return
-        self.detail.set(f"{device['model']} · iOS {device['ios']} · 电脑信任配对：{'已完成' if device['paired'] else '待完成'} · 开发者模式：{'已开启' if device.get('developer') is True else '未开启' if device.get('developer') is False else '尚未确认'}\n设置 → 隐私与安全性 → 开发者模式；开启后需重启并确认。")
+        self.detail.set(f"{device['model']} · iOS {device['ios']} · USB 信任：{'已核验' if device.get('usb_paired') or device['paired'] else '尚未确认'} · 开发配对：{'已就绪' if device['paired'] else '待检查'} · 开发者模式：{'已开启' if device.get('developer') is True else '未开启' if device.get('developer') is False else '尚未确认'}\n设置 → 隐私与安全性 → 开发者模式；开启后需重启并确认。")
         self.wireless_status.set(ws.state(device['udid']).get('message','无线连接尚未准备；安装成功后可自动配置。'))
         apps=device.get('controller_apps')
         inventory=('手机上未发现控制组件；VPN 与设备管理没有对应开发者项是正常的，请先安装。' if apps==[] else '手机上检测到控制组件；是否可运行仍需连接验证。' if apps else '控制组件安装状态暂未读取到，请保持解锁后重新检测。')
@@ -144,6 +144,7 @@ class DeviceWindow:
         problem=dm.compatibility_error(device)
         if problem:self.detail.set(self.detail.get()+'\n'+problem)
         pending=dm.setup_status(device['udid'])
+        self.refresh_setup_result(device['udid'],pending)
         if hasattr(self,'verify_button'):self.verify_button.configure(state='normal' if pending and pending.get('can_verify') and not self.busy else 'disabled')
         record=dm.signing_record(device['udid']);state,remaining=dm.expiry_state(record,int(self.panel.cfg.get('signature_warn_hours',48)))
         self.signature.set('签名：尚未安装，请点击下方安装按钮。' if not record else
@@ -157,6 +158,17 @@ class DeviceWindow:
             if getattr(self,'team_device',None)!=device['udid']:
                 team=record['team_id'];self.team.set(next((label for label,value in self.team_map.items() if value==team),team))
         self.team_device=device['udid']
+
+    def refresh_setup_result(self,udid,state):
+        previous=self.__dict__.get('_displayed_setup')
+        self._displayed_setup=(udid,dict(state or {}))
+        if self.busy or not previous:return
+        old_udid,old=previous
+        if (old_udid==udid and old.get('status') not in (None,'ready')
+            and state and state.get('status')=='ready'
+            and self.last_result==old.get('message')):
+            self.last_result=state.get('message','控制组件已连接验证。')
+            self.status.set(self.last_result)
 
     def begin_add(self,device):
         store=self.panel.__dict__.get('store')

@@ -151,7 +151,7 @@ def developer_mode(value):
     return None
 
 def resolve_developer_modes(devices):
-    pending=[d for d in devices if d.get('paired') and d.get('developer') is None]
+    pending=[d for d in devices if not d.get('paired') or d.get('developer') is None]
     if not pending:return devices
     from runtime_manager import probe_legacy
     try:values=probe_legacy([d['udid'] for d in pending])
@@ -160,8 +160,10 @@ def resolve_developer_modes(devices):
     by_id={normalize(d.get('udid','')):d for d in values}
     for device in pending:
         info=by_id.get(normalize(device['udid']),{})
-        if info.get('paired') is True and isinstance(info.get('developer'),bool):
-            device['developer']=info['developer'];device['developer_source']='lockdown'
+        if info.get('paired') is True:
+            device['usb_paired']=True
+            if isinstance(info.get('developer'),bool):
+                device['developer']=info['developer'];device['developer_source']='lockdown'
     return devices
 
 def wired_iphones(result):
@@ -173,6 +175,7 @@ def wired_iphones(result):
         devices.append({'udid':hardware.get('udid',''),'identifier':d['identifier'],
             'name':props.get('name','iPhone'),'model':hardware.get('marketingName','iPhone'),
             'ios':props.get('osVersionNumber','未知'),'paired':connection.get('pairingState')=='paired',
+            'coredevice_pairing':connection.get('pairingState'),
             'developer':developer_mode(props.get('developerModeStatus'))})
     return devices
 
@@ -308,7 +311,10 @@ def compatibility_error(device):
 
 def validate_device(device):
     if compatibility_error(device):raise SetupError('unsupported_ios',compatibility_error(device),'设备支持')
-    if not device.get('paired'):raise SetupError('pairing','手机尚未信任此电脑。请在 Finder 中选择手机并完成双方的信任提示；这不同于 VPN 与设备管理里的开发者 App 信任。','设备准备')
+    if not device.get('paired'):
+        if device.get('usb_paired') is True:
+            raise SetupError('developer_pairing','USB 信任已独立核验通过，但 Xcode 开发配对尚未就绪。请保持手机解锁，在 Xcode → Window → Devices and Simulators 选中此手机，完成配对或连接准备后重新检测。访达可访问不代表 Xcode 开发通道已就绪；无需反复进行「信任此电脑」。','开发配对')
+        raise SetupError('pairing','尚未确认这台手机的开发连接。请保持解锁并重新检测；若 Finder 仍要求信任，请完成双方提示；若访达已能访问，请在 Xcode 的 Devices and Simulators 检查开发配对。读取失败不能单独证明手机未信任电脑。','设备准备')
     if device.get('developer') is None:raise SetupError('developer_mode_unconfirmed','尚未确认手机开发者模式状态；请保持手机解锁并重新检测，或在 Xcode 设备窗口检查连接准备状态。未读到状态不代表未开启。','设备准备')
     if not device.get('developer'):raise SetupError('developer_mode','请开启手机开发者模式，重启并确认开启后再安装。','设备准备')
 
@@ -387,7 +393,23 @@ def setup_attempt(device,team,job):
 
 def provision(device,team,notify=lambda message:None):
     """Build/sign/install WDA for the selected USB phone. Never opens Instagram."""
-    with lock_device(device['udid']):return setup_attempt(device,team,lambda:_provision(device,team,notify))
+    with lock_device(device['udid']):
+        try:return setup_attempt(device,team,lambda:_provision(device,team,notify))
+        except SetupError as first:
+            state=setup_status(device['udid']) or {}
+            if first.code not in ('developer_untrusted','automation_startup','connection') or not state.get('can_verify'):raise
+            # The failed install released its runner lock. Keep the device lock and
+            # reuse only the signed, installed candidate verified by setup_attempt.
+            notify('控件已安装，首次启动验证未通过；正在自动复验一次，不重新安装或签名。若手机出现授权提示，请手动处理。')
+            runtime=device_dir(device['udid'])
+            write_json(runtime/'setup-recovery.json',{'attempts':1,'initial_error_code':first.code,'initial_error':str(first),'updated_at':datetime.now(timezone.utc).isoformat()})
+            try:return _verify_provision(device,notify)
+            finally:
+                current=setup_status(device['udid'])
+                if current:
+                    current.update(auto_verify_attempts=1,initial_error_code=first.code)
+                    try:write_json(runtime/'setup-state.json',current)
+                    except OSError:pass
 
 
 def stop_controller_for_install(device,bundle):
@@ -454,6 +476,9 @@ def _provision(device,team,notify):
         return record
 
 def verify_provision(device,notify=lambda message:None):
+    with lock_device(device['udid']):return _verify_provision(device,notify)
+
+def _verify_provision(device,notify):
     runtime=device_dir(device['udid'])
     try:pending=json.loads((runtime/'pending-setup.json').read_text());team=pending['team_id']
     except (OSError,ValueError,KeyError,TypeError):
@@ -498,7 +523,7 @@ def verify_provision(device,notify=lambda message:None):
             write_json(runtime/'active-session.json',value);write_json(runtime/'session-request.json',payload);write_json(runtime/'signing.json',current)
             write_json(runtime/'setup-state.json',{'status':'ready','message':'控制组件已连接验证。','updated_at':datetime.now(timezone.utc).isoformat()})
             (runtime/'pending-setup.json').unlink(missing_ok=True);return current
-    with lock_device(device['udid']):return setup_attempt(device,team,job)
+    return setup_attempt(device,team,job)
 
 
 def signing_record(udid):

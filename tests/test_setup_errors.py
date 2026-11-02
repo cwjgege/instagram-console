@@ -2,6 +2,29 @@ import unittest,sys
 from pathlib import Path
 sys.path.insert(0,str(Path('src').resolve()))
 
+class DeveloperAgreement(unittest.TestCase):
+ def test_actual_pla_error_wins_over_missing_device_profile_and_build_failure(self):
+  from setup_errors import classify_setup_error
+  logs='Provisioning profile does not include the currently selected device.\nUnable to process request - PLA Update available: You currently do not have access to this membership resource. To resolve this issue, agree to the latest Program License Agreement in your developer account.\n** TEST BUILD FAILED **'
+  issue=classify_setup_error(RuntimeError('xcodebuild failed with code 65'),logs)
+  self.assertEqual(issue.code,'developer_agreement_required');self.assertEqual(issue.stage,'开发者协议')
+  self.assertIn('https://developer.apple.com/account/',str(issue));self.assertIn('账号持有人',str(issue))
+ def test_explicit_updated_program_license_variants_are_recognized(self):
+  from setup_errors import classify_setup_error
+  for message in ('PLA Update available','You must accept the Apple Developer Program License Agreement','The Apple Developer Program License Agreement has been updated'):
+   with self.subTest(message=message):self.assertEqual(classify_setup_error(RuntimeError(message)).code,'developer_agreement_required')
+ def test_generic_profile_or_build_errors_do_not_invent_an_agreement_issue(self):
+  from setup_errors import classify_setup_error
+  for message in ('** TEST BUILD FAILED **','Provisioning profile does not include this device','The test bundle could not be found'):
+   with self.subTest(message=message):self.assertNotEqual(classify_setup_error(RuntimeError(message)).code,'developer_agreement_required')
+ def test_old_pla_failure_cannot_contaminate_a_new_install_attempt(self):
+  import tempfile
+  from setup_errors import log_positions,attempt_text,classify_setup_error
+  with tempfile.TemporaryDirectory() as folder:
+   p=Path(folder)/'appium.log';p.write_text('PLA Update available\n');positions=log_positions(folder)
+   with p.open('a') as f:f.write('** TEST BUILD FAILED **\n')
+   self.assertEqual(classify_setup_error(RuntimeError('code 65'),attempt_text(folder,positions)).code,'build_failed')
+
 class NetworkVerification(unittest.TestCase):
  def test_explicit_online_verification_takes_precedence_over_generic_xcode_trust_message(self):
   from setup_errors import classify_setup_error

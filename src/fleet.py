@@ -132,7 +132,12 @@ class Fleet:
         elif stopping:state,tag='正在停止','pending'
         elif alive:
             search=getattr(getattr(p,'runner',None),'feature_state',{}).get('search',{})
-            if search.get('cooldown'):
+            identity=getattr(getattr(p,'runner',None),'feature_state',{}).get('identity',{})
+            if search.get('recovering'):
+                state,tag='正在恢复视频页','pending';detail+='\n'+search.get('reason','正在确认视频页面')
+            elif not identity.get('enabled',True):
+                state,tag='浏览中 · 纯浏览','running';detail+='\n'+identity.get('reason','视频信息暂缺，暂停互动')
+            elif search.get('cooldown'):
                 state,tag='浏览中 · 搜索冷却','running';detail+='\n'+search.get('reason','等待下一次搜索')
             elif not search.get('enabled',True) and search.get('reason'):
                 state,tag='浏览中 · 搜索暂停','pending';detail+='\n搜索已暂停：'+search['reason']

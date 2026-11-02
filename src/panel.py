@@ -131,6 +131,13 @@ class Panel:
         for label,var,high in [('每次尝试',self.recovery_attempts,5),('5 分钟内上限',self.recovery_limit,20)]:
             ttk.Label(recovery,text=label).pack(side='left')
             w=ttk.Spinbox(recovery,from_=1,to=high,textvariable=var,width=3);w.pack(side='left',padx=(5,12));self.settings_widgets.append(w)
+        observation=ttk.Frame(settings);observation.pack(fill='x',pady=(12,0))
+        ttk.Label(observation,text='视频信息缺失时观察翻页').pack(side='left')
+        self.identity_observation_swipes=tk.StringVar(value=str(self.cfg.get('identity_observation_swipes',10)))
+        w=ttk.Spinbox(observation,from_=10,to=20,textvariable=self.identity_observation_swipes,width=4)
+        w.pack(side='left',padx=6);self.settings_widgets.append(w)
+        ttk.Label(observation,text='次（10～20）').pack(side='left')
+        ttk.Label(settings,text='观察期间仅浏览，暂停点赞、收藏、评论和搜索。达到次数后若控制正常，继续纯浏览并保留连接；确认不同视频标识后自动恢复。',style='Muted.TLabel',wraplength=680).pack(anchor='w',pady=(4,0))
         ttk.Label(settings,text='观看时间会变化，偶尔回看或连续翻页。点赞、收藏按说明匹配。\nAI 评论会另结合采样画面；断连或无法确认操作结果时停止。',wraplength=690).pack(anchor='w',pady=(20,0))
         ttk.Label(comments,text='用于“固定规则”模式；AI 生成请在“AI 评论”中配置。',wraplength=680).pack(anchor='w')
         ttk.Label(comments,text='依据视频说明匹配，不解析视频画面。每条评论每天最多使用一次。',wraplength=680).pack(anchor='w',pady=(4,10))
@@ -487,6 +494,8 @@ class Panel:
             cfg['recovery_enabled']=self.recovery_enabled.get()
             cfg['recovery_attempts']=int(self.recovery_attempts.get())
             cfg['recovery_run_limit']=int(self.recovery_limit.get())
+            observation=getattr(self,'identity_observation_swipes',None)
+            cfg['identity_observation_swipes']=int(observation.get()) if observation is not None else self.cfg.get('identity_observation_swipes',10)
             if not 1<=cfg['recovery_attempts']<=5 or not 1<=cfg['recovery_run_limit']<=20:
                 raise ValueError('恢复尝试须为 1～5，5 分钟内恢复上限须为 1～20')
             for key,var in self.motion_numbers.items():cfg[key]=int(var.get())
@@ -682,6 +691,8 @@ class Panel:
         if hasattr(self,'runner'):
             feature=self.runner.feature_state['search']
             self.feature_status.set('搜索状态：'+('本轮启用' if feature['enabled'] else (feature['reason'] or '本轮未启用')))
+            identity=self.runner.feature_state.get('identity',{})
+            if not identity.get('enabled',True):self.feature_status.set(identity['reason'])
             c=self.runner.counts
             self.stats.set(f"浏览 {c['watched']} · 翻页 {self.runner.swipes} · 点赞 {c['likes']} · 收藏 {c['saves']} · 评论 {c['comments']} · 搜索 {self.runner.searches} · 恢复 {self.runner.recoveries} · 重连 {self.runner.reconnections}")
         if self.closing and (not self.worker or not self.worker.is_alive()):

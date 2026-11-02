@@ -18,6 +18,8 @@ class NoRedirect(HTTPRedirectHandler):
 
 MODES={'usb':'USB','wifi':'本地 Wi-Fi','remote':'远程已有 WDA'}
 _PROCESSES={};_LOCK=threading.RLock()
+STARTUP_RETRY_CODES={'automation_startup','developer_untrusted','signature_or_trust'}
+STARTUP_SECURITY_CODES={'developer_untrusted','signature_or_trust'}
 
 def load(udid):
     import device_manager as dm
@@ -369,7 +371,7 @@ def wireless_ports(derived):
     return port,mjpeg
 
 def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
-    """Serialize this phone's startup; retry an explicit XCTest channel failure once."""
+    """Retry one ambiguous startup rejection, after device-local cleanup."""
     from runtime_manager import device_lock
     from runner import Halt
     with device_lock(udid):
@@ -379,11 +381,13 @@ def ensure_wifi(udid,notify=lambda s:None,stop=None,setting_override=None):
             try:
                 return _ensure_wifi_attempt(udid,notify,stop,setting_override,recovery)
             except SetupError as exc:
-                if exc.code!='automation_startup' or attempt:raise
+                if exc.code not in STARTUP_RETRY_CODES or attempt:raise
                 # The failed attempt stopped and waited for our own process.
                 # Never reboot the phone, change trust, or replay gestures here.
                 recovery={'recovery_attempt':1,'previous_error_code':exc.code,'previous_error':str(exc)[:1200]}
-                notify('XCTest 控制通道建立失败，已清理此设备由本软件启动的控制进程；保持手机解锁，2 秒后重新建立一次控制连接…')
+                reason=('手机启动安全校验未通过，可能与开发连接状态或信任验证有关，尚不能断定证书失效。'
+                        if exc.code in STARTUP_SECURITY_CODES else 'XCTest 控制通道建立失败。')
+                notify(reason+'已清理此设备由本软件启动的控制进程；保持手机解锁，2 秒后重新核验配对和签名，再建立一次控制连接…')
                 if stop is not None:
                     if stop.wait(2):raise Halt('已手动停止')
                 else:time.sleep(2)
@@ -393,6 +397,9 @@ def _ensure_wifi_attempt(udid,notify,stop,setting_override,recovery):
     trace={'stage':'preflight','candidates':[],**recovery}
     try:
         url=_ensure_wifi(udid,notify,stop,setting_override,trace)
+        if recovery:
+            trace['recovery_succeeded']=True
+            notify('此设备控制连接已自动恢复，已重新核验原设备和组件；未重新安装或签名，继续运行。')
         # Preserve candidate failures even if a later development tunnel succeeds.
         try:
             import device_manager as dm
@@ -422,7 +429,10 @@ def _ensure_wifi_attempt(udid,notify,stop,setting_override,recovery):
                 trace['fallback_error']=str(fallback)[:2000]
                 stop_device(udid);error_type=WirelessStartupUnavailable if isinstance(fallback,controller_bridge.ControllerStartupError) else RuntimeError
                 exc=fallback if isinstance(fallback,SetupError) else error_type(str(exc)+'；备用无线通道：'+str(fallback))
-        if isinstance(exc,SetupError) and exc.code=='automation_startup' and recovery:
+        if isinstance(exc,SetupError) and exc.code in STARTUP_SECURITY_CODES:
+            prefix='清理此设备控制进程并自动重试一次后仍未恢复。\n' if recovery else ''
+            exc=SetupError(exc.code,prefix+'手机安全校验拒绝启动控制组件；此报错不足以确认是证书未受信任，也可能是开发连接状态异常。请先仅将这台手机的 USB 拔下后重新插入，输入密码解锁，再点击「重新验证已安装组件（不重新签名）」；若仍失败，请查看手机「设置 → 通用 → VPN 与设备管理」中的开发者验证状态。若无对应条目或已验证，请保留本次启动日志继续排查，不要反复重装或创建证书。',exc.stage)
+        elif isinstance(exc,SetupError) and exc.code=='automation_startup' and recovery:
             exc=SetupError(exc.code,'清理此设备控制进程并自动重试一次后仍未恢复。\n'+str(exc),exc.stage)
         # A diagnostic write failure must not replace the original connection error.
         try:path=record_connection_failure(udid,trace,exc)
@@ -550,8 +560,8 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
                 trace['stage']='component_missing'
                 raise RuntimeError('手机未安装本机签名记录对应的控制组件（'+bundle+'）。请在“连接与签名”恢复该组件；若换过签名团队，需要核对实际安装标识。无需因此重复创建证书。')
             issue=classify_setup_error(RuntimeError('XCTest 启动失败'),recent)
-            if issue.code=='automation_startup':
-                trace['stage']='automation_startup'
+            if issue.code!='unknown':
+                trace['stage']=issue.code
                 raise issue
             if trace['stage']=='wda_endpoint':raise RuntimeError('组件已报告启动，但控制端口未通过验证；请检查局域网直连，详情见 wireless-wda.log。')
             raise RuntimeError('已安装组件启动失败；请查看 wireless-wda.log 中的具体原因，不会自动覆盖安装或创建证书。')

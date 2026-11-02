@@ -72,3 +72,45 @@ class StartupRecovery(unittest.TestCase):
   path=Path(self.tmp.name)/'controller.log'
   path.write_text(FAILURE+'\n'+json.dumps({'event':'error','error':'IdentityMismatch: wrong device'}))
   self.assertIsInstance(bridge.startup_failure(path,1),cn.FingerprintMismatch)
+
+class StartupSecurityRecovery(unittest.TestCase):
+ setUp=StartupRecovery.setUp
+ def test_security_rejection_recovers_once_without_signing_or_changing_other_devices(self):
+  for code in ('developer_untrusted','signature_or_trust'):
+   with self.subTest(code=code):
+    notifications=[];other=Mock();cn._PROCESSES['b'*40]=other
+    try:
+     with patch.object(cn,'_ensure_wifi',side_effect=[SetupError(code,'ambiguous startup rejection'),'http://127.0.0.1:19001']) as connect,patch.object(cn,'stop_device') as cleanup,patch.object(cn.time,'sleep'),patch.object(dm,'provision') as sign:
+      self.assertEqual(cn.ensure_wifi(UDID,notifications.append),'http://127.0.0.1:19001')
+     self.assertEqual(connect.call_count,2);cleanup.assert_called_once_with(UDID);sign.assert_not_called();other.terminate.assert_not_called()
+     self.assertTrue(any('尚不能断定证书失效' in n for n in notifications));self.assertTrue(any('已自动恢复' in n for n in notifications))
+     evidence=json.loads((dm.device_dir(UDID)/'connection-attempt.json').read_text())
+     self.assertTrue(evidence['recovery_succeeded']);self.assertEqual(evidence['previous_error_code'],code)
+    finally:cn._PROCESSES.pop('b'*40,None)
+ def test_persistent_security_rejection_is_neutral_and_actionable(self):
+  for code in ('developer_untrusted','signature_or_trust'):
+   with self.subTest(code=code),patch.object(cn,'_ensure_wifi',side_effect=SetupError(code,'refused')) as connect,patch.object(cn,'stop_device'),patch.object(cn.time,'sleep'):
+    with self.assertRaises(SetupError) as caught:cn.ensure_wifi(UDID)
+    self.assertEqual(connect.call_count,2);self.assertEqual(caught.exception.code,code)
+    for text in ('自动重试一次后仍未恢复','不足以确认','USB','重新验证已安装组件','VPN 与设备管理'):self.assertIn(text,str(caught.exception))
+ def test_explicit_revocation_wins_over_ambiguous_trust_and_never_retries(self):
+  issue=classify_setup_error(RuntimeError('startup'),'Developer App Certificate is not trusted; certificate was revoked')
+  self.assertEqual(issue.code,'signature_invalid')
+  with patch.object(cn,'_ensure_wifi',side_effect=issue) as connect,patch.object(cn,'stop_device'),patch.object(cn.time,'sleep') as wait:
+   with self.assertRaises(SetupError):cn.ensure_wifi(UDID)
+   connect.assert_called_once();wait.assert_not_called()
+ def test_other_known_failures_are_not_auto_retried(self):
+  for code in ('locked','developer_mode','developer_agreement_required','signing_failed','verification'):
+   with self.subTest(code=code),patch.object(cn,'_ensure_wifi',side_effect=SetupError(code,'blocked')) as connect,patch.object(cn,'stop_device'),patch.object(cn.time,'sleep') as wait:
+    with self.assertRaises(SetupError):cn.ensure_wifi(UDID)
+    connect.assert_called_once();wait.assert_not_called()
+ def test_security_retry_is_cancelable(self):
+  stop=Mock();stop.is_set.return_value=False;stop.wait.return_value=True
+  with patch.object(cn,'_ensure_wifi',side_effect=SetupError('developer_untrusted','refused')) as connect,patch.object(cn,'stop_device'):
+   with self.assertRaises(Halt):cn.ensure_wifi(UDID,stop=stop)
+   connect.assert_called_once()
+ def test_bridge_preserves_explicit_security_and_revocation_errors(self):
+  path=Path(self.tmp.name)/'controller.log'
+  for message,code in (('Developer App Certificate is not trusted','developer_untrusted'),('invalid code signature','signature_or_trust'),('certificate was revoked','signature_invalid')):
+   path.write_text(message+'\n'+json.dumps({'event':'error','error':'标准 Xcode 启动提前结束，退出码 65'}))
+   self.assertEqual(bridge.startup_failure(path,1).code,code)

@@ -29,6 +29,9 @@ def attempt_text(runtime,positions):
 def classify_setup_error(error,logs=''):
     if isinstance(error,SetupError):return error
     text=(str(error)+'\n'+logs).casefold()
+    if ('pla update available' in text or
+        ('program license agreement' in text and any(s in text for s in ('agree to','must accept','must be accepted','has not been accepted','has been updated','requires acceptance')))):
+        return SetupError('developer_agreement_required','Apple 开发者协议需要确认。请使用所选签名团队的账号持有人（Account Holder）账号登录 https://developer.apple.com/account/，在账户首页查看并亲自确认待更新的开发者计划许可协议。确认后回到本软件，重新点击「安装／重新签名控制组件」，让 Xcode 更新包含这台手机的描述文件。当前签名安装尚未完成。','开发者协议')
     if any(s in text for s in ('maximum number of registered iphone devices','maximum number of registered devices','maximum number of devices','device limit reached','reached the maximum number of registered')):
         return SetupError('device_limit','所选 Apple 签名团队的设备注册名额已满，本次未完成签名安装。请在下方切换到有空余名额的团队，或等待旧设备注册到期后重试。删除本机设备记录或证书不会立即释放名额；本机描述文件不能证明 Apple 当前名额状态。','签名')
     if 'invalid trust settings' in text and 'restore system default' in text:
@@ -37,10 +40,10 @@ def classify_setup_error(error,logs=''):
         return SetupError('xcode_device_missing','Xcode 没有把所选手机列为可用安装目标。请检查 Xcode 的设备支持范围、配对与连接；iOS 16 请使用支持它的 Xcode 版本。无需先重建证书。','设备支持')
     if any(s in text for s in ('unable to verify app','profile needs network validation','requires network validation')):
         return SetupError('network_validation','手机尚未完成 Apple 在线签名验证。请保持手机联网，检查 VPN/代理是否影响 ppq.apple.com 的 HTTPS 连接；在手机打开一次控制组件后重新验证。VPN 与设备管理没有信任条目时，不要反复重签名。')
-    if any(s in text for s in ('developer app certificate is not trusted','untrusted developer','开发者未受信任')):
-        return SetupError('developer_untrusted','控制组件启动被手机拒绝：开发者 App 尚未受信任或未完成验证。若手机「VPN 与设备管理」有对应开发者条目，请完成信任；若没有条目或提示 Unable to Verify App，请先让手机正常联网并检查 VPN/代理，再打开一次控制组件完成 Apple 在线验证。随后点击「重新验证已安装组件」。无需反复重新签名。')
     if any(s in text for s in ('provisioning profile has expired','certificate has expired','signing certificate is invalid','certificate was revoked')):
         return SetupError('signature_invalid','签名证书或描述文件已失效。请在 Xcode 检查签名账号和有效证书，再重新签名安装。','签名')
+    if any(s in text for s in ('developer app certificate is not trusted','untrusted developer','开发者未受信任')):
+        return SetupError('developer_untrusted','手机以开发者 App 信任或验证问题拒绝启动组件；也可能是开发连接状态异常，此报错不足以确认证书失效。请保持手机解锁，重新插拔 USB 后点击「重新验证已安装组件（不重新签名）」。若仍失败，在手机「VPN 与设备管理」查看对应开发者的验证状态；若没有条目或提示 Unable to Verify App，请确认手机正常联网及 VPN/代理状态。无需反复重新签名。')
     if 'invalid code signature' in text or 'inadequate entitlements' in text:
         return SetupError('signature_or_trust','手机拒绝启动：签名、权限或开发者信任未通过。请先检查手机「VPN 与设备管理」的验证状态；若已验证，再检查本次签名证书和描述文件。')
     if any(s in text for s in ('maximum number of apps for free development','maximum app id limit','maximum number of registered app ids')):

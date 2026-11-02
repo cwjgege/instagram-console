@@ -61,6 +61,33 @@ class TimeoutChannel(unittest.TestCase):
   r.advance_after_read_timeout({'key':'old'})
   r.gesture.assert_called_once();r.wait_for_page_response.assert_called_once();self.assertEqual(r.swipes,1)
 
+ def test_acknowledged_swipe_without_caption_can_continue_without_interactions(self):
+  for before,after in (({'key':'old'},{'key':None}),({'key':None},{'key':'new'}),({'key':None},{'key':None})):
+   with self.subTest(before=before,after=after):
+    r=self.r;r.swipes=0;r.gesture=Mock();r.read_reel=Mock(return_value=after);r.recover_connection=Mock()
+    r.advance_after_read_timeout(before)
+    r.gesture.assert_called_once();r.read_reel.assert_called_once();self.assertEqual(r.swipes,1)
+    self.assertTrue(r.skip_interactions_once);self.assertEqual(r.last_swipe_post,after);r.recover_connection.assert_not_called()
+
+ def test_uncertain_swipe_without_identity_stops_after_bounded_reads(self):
+  r=self.r
+  def gesture(*args,**kwargs):r._gesture_action_attempted=True;raise TransportLost('reply timed out')
+  r.gesture=Mock(side_effect=gesture);r.read_reel=Mock(return_value={'key':None});r.recover_connection=Mock()
+  with self.assertRaisesRegex(RuntimeError,'有限核验'):r.advance_after_read_timeout({'key':'old'})
+  r.gesture.assert_called_once();self.assertEqual(r.read_reel.call_count,4);self.assertEqual(r.swipes,0);r.recover_connection.assert_not_called()
+
+ def test_uncertain_unchanged_video_cannot_wait_forever(self):
+  r=self.r
+  def gesture(*args,**kwargs):r._gesture_action_attempted=True;raise TransportLost('reply timed out')
+  r.gesture=Mock(side_effect=gesture);r.read_reel=Mock(return_value={'key':'old'})
+  with self.assertRaisesRegex(RuntimeError,'有限核验'):r.advance_after_read_timeout({'key':'old'})
+  r.gesture.assert_called_once();self.assertEqual(r.read_reel.call_count,4);self.assertEqual(r.swipes,0)
+
+ def test_pending_page_recovery_obeys_its_own_expired_deadline(self):
+  r=self.r;r.snapshot=Mock();r.control_available=Mock()
+  with self.assertRaisesRegex(RuntimeError,'核验超时'):r.wait_for_page_response(deadline=0)
+  r.snapshot.assert_not_called();r.control_available.assert_not_called()
+
  def test_uncertain_swipe_stays_pending_until_manual_stop_not_blind_retry(self):
   r=self.r
   def gesture(*args,**kwargs):r._gesture_action_attempted=True;raise TransportLost('reply timed out')

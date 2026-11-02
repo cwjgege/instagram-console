@@ -33,6 +33,8 @@ RECONNECT_QUICK_DELAYS=(0,2,5)
 RECONNECT_BACKOFF_DELAYS=(15,30,60)
 RECONNECT_WINDOW_SECONDS=300
 RECONNECT_WINDOW_LIMIT=9
+SEARCH_RETURN_SECONDS=90
+SEARCH_RETURN_READ_ATTEMPTS=2
 SEARCH_STAGE_SECONDS={
     'open_explore':60,'locate_input':45,'focus_input':45,'submit_query':45,
     'verify_results':60,'select_result':45,'open_video':45,'return_results':45,
@@ -50,13 +52,16 @@ def search_budget_seconds(cfg):
 
 class ManualResume(BaseException):
     """Unwind all stale navigation/interaction frames after a human handoff."""
-AUTOMATION_DEFAULTS = dict(like_interval_min=3,like_interval_max=8,recovery_enabled=True,recovery_attempts=3,recovery_run_limit=5,
+AUTOMATION_DEFAULTS = dict(like_interval_min=3,like_interval_max=8,recovery_enabled=True,recovery_attempts=3,recovery_run_limit=5,identity_observation_swipes=10,
     gesture_left=30,gesture_right=58,gesture_top=28,gesture_bottom=66,
     gesture_distance_min=22,gesture_distance_max=32,gesture_duration_min=220,gesture_duration_max=480,
     reconnect_enabled=True,reconnect_limit=2,close_business_chat=True,usb_wait_seconds=60,
     search_videos_per_query=2,search_result_scrolls=1,search_watch_min=10,search_watch_max=20,diagnostic_screenshots=False)
 
 def validate_motion(cfg):
+    observation=cfg.get('identity_observation_swipes',10)
+    if type(observation) is not int or not 10<=observation<=20:
+        raise ValueError('视频识别观察翻页次数须为 10～20 的整数')
     if not 1<=cfg.get('like_interval_min',3)<=cfg.get('like_interval_max',8)<=100:
         raise ValueError('点赞间隔须为 1～100 条视频，且最小值不能大于最大值')
     for low,high,minimum,maximum in [('gesture_left','gesture_right',20,65),
@@ -103,6 +108,9 @@ class WatchBudgetExpired(RuntimeError):
     pass
 
 class SearchTimedOut(NavigationLost):
+    pass
+
+class SearchReturnExpired(RuntimeError):
     pass
 
 def atomic_json(path, value):
@@ -181,6 +189,7 @@ class Runner:
         self.interaction_deadline = None
         self.search_deadline = None
         self.search_overall_deadline = None
+        self.search_return_deadline = None
         self.deferred_account_reminder = False
         self.video_watch = None
         self.refresh_required = False
@@ -188,6 +197,11 @@ class Runner:
         self.page_state = None
         self.active_search_term = None
         self.feature_state = {'search': {'enabled': bool(config.get('enable_search')), 'reason': ''}}
+        self.identity_degraded=False
+        self.identity_swipes=0
+        self.identity_recovery_key=None
+        self.identity_warned=False
+        self.feature_state['identity']={'enabled':True,'reason':'','swipes':0}
         self.search_failures = 0
         self.search_consecutive_failures = 0
         self.search_retry_at = None
@@ -215,7 +229,7 @@ class Runner:
         except Exception:return False
 
     def manual_handoff(self):
-        self.search_deadline=None;self.search_overall_deadline=None
+        self.search_deadline=None;self.search_overall_deadline=None;self.search_return_deadline=None
         self._handling_pause=True
         started=time.monotonic()
         if self.current_post_key:self.handoff_skip_keys.add(self.current_post_key)
@@ -295,16 +309,19 @@ class Runner:
         readonly=method=='GET' or suffix=='/elements' or (
             suffix=='/execute/sync' and (data or {}).get('script')=='mobile: activeAppInfo')
         def send():
-            deadlines=[d for d in (getattr(self,'interaction_deadline',None),getattr(self,'search_deadline',None),getattr(self,'search_overall_deadline',None),getattr(self,'watch_read_deadline',None) if readonly else None) if d is not None]
+            deadlines=[d for d in (getattr(self,'interaction_deadline',None),getattr(self,'search_deadline',None),getattr(self,'search_overall_deadline',None),getattr(self,'search_return_deadline',None),getattr(self,'watch_read_deadline',None) if readonly else None) if d is not None]
             deadline=min(deadlines) if deadlines else None
             if deadline is None:return self.http(method,self.path+suffix,data)
             remaining=deadline-time.monotonic()
             if remaining<=0:
+                if getattr(self,'search_return_deadline',None)==deadline:raise SearchReturnExpired('搜索返回页面核验预算已用完')
                 if getattr(self,'watch_read_deadline',None)==deadline:raise WatchBudgetExpired('本条观看预算已用完')
                 if deadline in (getattr(self,'search_deadline',None),getattr(self,'search_overall_deadline',None)):raise SearchTimedOut('搜索请求超过剩余阶段或整体预算，暂停本轮搜索')
                 raise InteractionSkipped('收藏确认已超时，跳过本条，不重复发送收藏操作')
             try:return self.http(method,self.path+suffix,data,timeout=min(35,remaining))
             except Exception as exc:
+                if getattr(self,'search_return_deadline',None)==deadline and transport_error(exc) and time.monotonic()>=deadline:
+                    raise SearchReturnExpired('搜索返回页面读取持续超时') from exc
                 if getattr(self,'watch_read_deadline',None)==deadline and transport_error(exc) and time.monotonic()>=deadline:
                     raise WatchBudgetExpired('播放进度读取未在本条预算内完成') from exc
                 if transport_error(exc):self.check()
@@ -563,7 +580,7 @@ class Runner:
         A local Appium /status response cannot establish phone reachability.
         This read has its own budget after the failed operation's budget expires.
         """
-        names=('search_deadline','search_overall_deadline','interaction_deadline','watch_read_deadline')
+        names=('search_deadline','search_overall_deadline','search_return_deadline','interaction_deadline','watch_read_deadline')
         saved={name:getattr(self,name,None) for name in names}
         try:
             for name in names:setattr(self,name,None)
@@ -592,17 +609,18 @@ class Runner:
             if attempt==0:self.wait(1)
         return False
 
-    def recover_connection(self):
+    def recover_connection(self,single_attempt=False):
         self.check()
         if self.in_interaction:raise RuntimeError('互动过程中连接中断，结果未确认，已停止且不会重发')
         if not self.cfg['reconnect_enabled']:raise RuntimeError('控制连接中断，自动重连已关闭')
-        delays=RECONNECT_QUICK_DELAYS+RECONNECT_BACKOFF_DELAYS[:self.cfg['reconnect_limit']]
+        delays=(0,) if single_attempt else RECONNECT_QUICK_DELAYS+RECONNECT_BACKOFF_DELAYS[:self.cfg['reconnect_limit']]
         for index,delay in enumerate(delays):
             self.check()
             now=time.monotonic();self.reconnect_times=[t for t in self.reconnect_times if now-t<RECONNECT_WINDOW_SECONDS]
             if len(self.reconnect_times)>=RECONNECT_WINDOW_LIMIT:
                 raise RuntimeError('控制连接恢复失败，5 分钟内重连次数已用完；请检查手机与连接后重新开始')
-            quick=index<len(RECONNECT_QUICK_DELAYS);phase='快速重连' if quick else '延后重连'
+            quick=not single_attempt and index<len(RECONNECT_QUICK_DELAYS)
+            phase='重建连接' if single_attempt else ('快速重连' if quick else '延后重连')
             self.log('reconnect_wait',message=phase+'：等待 '+str(delay)+' 秒后尝试',attempt=index+1,total=len(delays),delay_seconds=delay,phase='quick' if quick else 'backoff')
             if delay:self.wait(delay)
             self.check();self.reconnections+=1;self.reconnect_times.append(time.monotonic())
@@ -619,6 +637,7 @@ class Runner:
             self.skip_interactions_once=True;self.current_post_key=None
             self.log('reconnected',message='连接及视频页面已恢复，继续浏览；跳过恢复时视频的互动',reconnections=self.reconnections,attempt=index+1)
             return
+        if single_attempt:raise RuntimeError('单次控制连接重建后仍未恢复视频页面，已停止；请检查手机页面或重新插拔这台手机的 USB 后再开始')
         raise RuntimeError('控制连接恢复失败，3 次快速重试及延后重试次数已用完；请检查手机与连接后重新开始')
 
     def confirm_reel_loaded(self):
@@ -681,6 +700,11 @@ class Runner:
             input_open=any(e.tag in ('XCUIElementTypeTextField','XCUIElementTypeTextView','XCUIElementTypeSecureTextField') for e in nodes)
             if state.kind=='reels' and is_reels and not modal and not input_open and 'like-button' in names and 'comment-button' in names:
                 break
+            # A known page change is navigation loss, even when the short
+            # progress-read budget would expire during another snapshot.
+            # Do not turn observed non-video UI into a transport timeout.
+            if getattr(self,'watch_read_deadline',None) is not None and state.kind!='reels':
+                raise NavigationLost('已离开视频页：'+state.reason+'；尝试返回 Reels')
             if collection_sheet_nodes(tree):raise NavigationLost('出现收藏夹选择弹层，需关闭后跳过本次互动')
             if attempt<2:
                 self.wait(.7)
@@ -746,6 +770,7 @@ class Runner:
             except Exception as exc:
                 if not isinstance(exc,(WatchBudgetExpired,TransportLost)) and not transport_error(exc):raise
                 self.watch_read_deadline=None
+                self.require_reel_context()
                 self.log('watch_read_timeout',message='播放进度读取未完成，跳过进度判断，尝试一次翻页；不据此判定断线')
                 current['done']=True
                 self.log('watch_progress_skipped',message='跳过本条进度和互动，单次翻页后核对视频控件')
@@ -885,7 +910,37 @@ class Runner:
         self.log('recovered',message='已恢复 Reels，重新识别当前视频',recoveries=self.recoveries)
         return post
 
+    def observe_identity(self,post,advanced=False):
+        """Count acknowledged forward swipes, never polls or uncertain writes."""
+        key=post.get('key')
+        if not key and not self.identity_degraded:
+            self.identity_degraded=True
+            self.identity_swipes=0
+            self.identity_recovery_key=None
+            self.identity_warned=False
+            self.log('identity_observation',message='视频信息暂缺，进入纯浏览观察；暂停点赞、收藏、评论和搜索，保留当前连接')
+        if not self.identity_degraded:return
+        if advanced:
+            self.identity_swipes+=1
+            if key and self.identity_recovery_key and key!=self.identity_recovery_key:
+                self.identity_degraded=False
+                self.skip_interactions_once=True
+                self.feature_state['identity']={'enabled':True,'reason':'','swipes':self.identity_swipes}
+                self.log('identity_recovered',message='连续翻页已确认不同视频标识，恢复正常浏览；当前视频仍跳过互动')
+                return
+            self.identity_recovery_key=key
+        elif not key:
+            self.identity_recovery_key=None
+        limit=self.cfg['identity_observation_swipes']
+        reason=(f'视频信息暂缺，纯浏览观察 {min(self.identity_swipes,limit)}/{limit} 次；暂停互动与搜索'
+                if self.identity_swipes<limit else '视频识别暂不兼容，继续纯浏览；暂停互动与搜索，保留连接')
+        self.feature_state['identity']={'enabled':False,'reason':reason,'swipes':self.identity_swipes}
+        if self.identity_swipes>=limit and not self.identity_warned:
+            self.identity_warned=True
+            self.log('feature_disabled',feature='identity',message=reason,observed_swipes=self.identity_swipes)
+
     def consider_like(self,post,related):
+        if getattr(self,'identity_degraded',False):return
         if self.browse_only or not self.cfg['enable_likes'] or not post['key']:return
         if post['key'] in self.like_seen:return
         self.like_seen.add(post['key'])
@@ -908,6 +963,7 @@ class Runner:
                     and not any(t.casefold() in caption for t in self.cfg['exclude_keywords']))
 
     def reserve(self, post, kind, text=None):
+        if getattr(self,'identity_degraded',False) or not post.get('key'):return False
         entry = self.daily['posts'].setdefault(post['key'],{})
         if entry.get(kind) or self.daily[kind] >= self.cfg['max_'+kind+'_per_day']:
             return False
@@ -939,6 +995,7 @@ class Runner:
         finally:self.interaction_deadline=previous
 
     def _toggle_on(self, post, kind, name, allowed_labels):
+        if getattr(self,'identity_degraded',False) or not post.get('key'):return
         current = self.read_reel()
         if current['key'] != post['key']:
             raise InteractionSkipped('视频发生变化，已跳过本条互动')
@@ -1023,6 +1080,7 @@ class Runner:
         self.send_comment(post,reply)
 
     def send_comment(self,post,reply):
+        if getattr(self,'identity_degraded',False) or not post.get('key'):return
         if not ai_comments.english_text(reply):
             self.log('comment_skip',message='评论不是英文，已跳过')
             return
@@ -1063,6 +1121,7 @@ class Runner:
         self.close_comments()
 
     def ai_comment(self,post,preview=False):
+        if getattr(self,'identity_degraded',False):return
         if not post['key']:
             self.log('ai_skip',message='无法稳定识别当前视频，跳过评论')
             return
@@ -1209,6 +1268,39 @@ class Runner:
         if self.search_overall_deadline is not None:self.search_deadline=min(self.search_deadline,self.search_overall_deadline)
         self.log('search_stage',message='搜索：'+SEARCH_STAGE_LABELS[stage],stage=stage,budget_seconds=round(budget,1))
 
+    def recover_search_browsing(self):
+        """Bound page-read recovery independently of cheap control probes."""
+        if not self.cfg.get('recovery_enabled',True):
+            raise RuntimeError('搜索已暂停，但自动恢复已关闭，请手动返回短视频页')
+        previous=getattr(self,'search_return_deadline',None)
+        self.search_return_deadline=time.monotonic()+SEARCH_RETURN_SECONDS
+        try:
+            for attempt in range(SEARCH_RETURN_READ_ATTEMPTS):
+                self.check()
+                try:
+                    if time.monotonic()>=self.search_return_deadline:raise SearchReturnExpired('搜索返回页面核验预算已用完')
+                    # Fresh observations authorize navigation; never replay the
+                    # failed search click, clear, value, or submit request.
+                    self.return_from_search()
+                    self.skip_interactions_once=True;self.video_watch=None;self.current_post_key=None
+                    return
+                except (Halt,PageBlocked):raise
+                except NavigationLost as exc:
+                    raise RuntimeError('搜索恢复未能确认视频页面，请检查手机页面后重新开始') from exc
+                except Exception as exc:
+                    if not isinstance(exc,(SearchReturnExpired,WatchBudgetExpired,TransportLost)) and not transport_error(exc):raise
+                    self.log('search_return_read_failed',message='搜索返回页面读取未完成；窗口尺寸或预览正常不能代替页面核验',attempt=attempt+1,
+                             reason=diagnostics.redact(str(exc)))
+                    if isinstance(exc,SearchReturnExpired) or time.monotonic()>=self.search_return_deadline:break
+                    if attempt+1<SEARCH_RETURN_READ_ATTEMPTS:self.wait(2)
+        finally:self.search_return_deadline=previous
+        self.check()
+        self.feature_state['search']={'enabled':False,'recovering':True,'reason':'搜索返回页面持续读不到，正在重建一次连接恢复视频'}
+        self.log('search_page_unresponsive',message='搜索返回页面持续无法读取，停止等待并重建一次连接；不重复搜索或互动')
+        self.recover_connection(single_attempt=True)
+        self.skip_interactions_once=True;self.video_watch=None;self.current_post_key=None
+        self.log('search_resumed',message='已重建连接并确认视频页，暂停搜索后继续浏览')
+
     def search_ready(self):
         if self.feature_state['search']['enabled']:return True
         if self.search_retry_at is None or time.monotonic()<self.search_retry_at:return False
@@ -1236,17 +1328,13 @@ class Runner:
         except Exception as exc:
             self.search_deadline=None;self.search_overall_deadline=None
             self.search_failures+=1;self.search_consecutive_failures+=1
-            self.feature_state['search']={'enabled':False,'reason':'搜索失败，正在恢复视频浏览'}
+            self.feature_state['search']={'enabled':False,'recovering':True,'reason':'搜索失败，正在恢复视频浏览'}
             self.diagnose('search',exc)
             self.log('search_recovering',message='本次搜索已放弃，正在确认能否继续短视频浏览',reason=diagnostics.redact(str(exc)))
-            while True:
-                try:
-                    # Always re-observe before navigating. Never replay search
-                    # input or an uncertain action from the failed search.
-                    self.return_from_search()
-                    break
-                except TransportLost:self.wait_for_page_response()
-                except NavigationLost as recovery:raise RuntimeError('搜索恢复未能确认视频页面，请检查手机页面后重新开始') from recovery
+            try:self.recover_search_browsing()
+            except BaseException:
+                self.feature_state['search']={'enabled':False,'reason':'搜索恢复未完成，视频浏览尚未恢复'}
+                raise
             # Schedule from successful recovery, never from the start of a long search.
             if self.search_consecutive_failures>=3 or self.search_attempts>=self.cfg['max_searches_per_run']:
                 self.search_retry_at=None
@@ -1402,15 +1490,17 @@ class Runner:
         self.log('gesture',message='已完成中央区域竖向滑动',direction=direction,
                  start=[x,y1],end=[x,y2],duration_ms=duration)
 
-    def wait_for_page_response(self):
+    def wait_for_page_response(self,deadline=None):
         """Wait without UI writes; reconnect only after repeated independent failures."""
         failures=0
         while True:
             self.check()
+            if deadline is not None and time.monotonic()>=deadline:
+                raise RuntimeError('翻页后的页面核验超时，已停止；不会重复滑动，请检查手机页面后重新开始。')
             try:
                 old=getattr(self,'watch_read_deadline',None)
                 try:
-                    self.watch_read_deadline=time.monotonic()+15
+                    self.watch_read_deadline=min(time.monotonic()+15,deadline) if deadline is not None else time.monotonic()+15
                     tree=self.snapshot()
                     self.observe(tree)
                 finally:self.watch_read_deadline=old
@@ -1419,6 +1509,8 @@ class Runner:
             except (Halt,PageBlocked):raise
             except Exception as exc:
                 if not isinstance(exc,(TransportLost,WatchBudgetExpired)) and not transport_error(exc):raise
+            if deadline is not None and time.monotonic()>=deadline:
+                raise RuntimeError('翻页后的页面核验超时，已停止；不会重复滑动，请检查手机页面后重新开始。')
             if self.control_available():failures=0
             else:failures+=1
             if failures>=2:
@@ -1428,8 +1520,16 @@ class Runner:
             self.log('page_response_waiting',message='页面读取待确认，暂不重建连接，不重复发送动作',failed_checks=failures)
             self.wait(5)
 
+    def require_reel_context(self):
+        """Never use a stale Reel as permission to swipe observed non-video UI."""
+        state=getattr(self,'page_state',None)
+        if state is not None and state.kind!='reels':
+            raise NavigationLost('已离开视频页：'+state.reason+'；尝试返回 Reels')
+
     def advance_after_read_timeout(self,before):
         """One normal swipe from the last verified Reel; never resend on timeout."""
+        self.require_reel_context()
+        self.observe_identity(before)
         self.skip_interactions_once=True
         uncertain=False
         try:self.gesture('up',allow_cached_rect=True)
@@ -1444,21 +1544,40 @@ class Runner:
             self.swipes+=1;self.position+=1
             self.log('swipe',direction='up',message='进度读取异常后已执行一次翻页，等待视频信息确认')
         self.wait(2)
+        verification_deadline=time.monotonic()+30
+        reads=0
         # A late response may arrive after the action request timed out. Only
         # read from here onward; no gesture retries or social interactions.
         while True:
             self.check()
+            if reads>=4 or time.monotonic()>=verification_deadline:
+                raise RuntimeError('滑动结果在有限核验内仍无法确认，已停止；不会重复滑动，请手动检查手机页面。')
+            reads+=1
             try:
                 old=getattr(self,'watch_read_deadline',None)
                 try:
-                    self.watch_read_deadline=time.monotonic()+15
+                    self.watch_read_deadline=min(time.monotonic()+15,verification_deadline)
                     after=self.read_reel()
                 finally:self.watch_read_deadline=old
+            except NavigationLost as exc:
+                if uncertain:
+                    raise RuntimeError('滑动响应无法确认且已离开视频页，已停止；不会重复滑动，请手动检查页面。') from exc
+                raise
             except (TransportLost,WatchBudgetExpired):
-                tree=self.wait_for_page_response()
+                if not uncertain:self.require_reel_context()
+                tree=self.wait_for_page_response(deadline=verification_deadline)
                 if tree is None:return
+                if not uncertain:self.require_reel_context()
                 continue
             if not before.get('key') or not after.get('key'):
+                if not uncertain:
+                    # read_reel has verified the Reel and excluded inputs/sheets.
+                    # Missing caption/author forbids identity-based interactions,
+                    # but cannot invalidate an acknowledged gesture forever.
+                    self.last_swipe_post=after
+                    self.observe_identity(after,advanced=True)
+                    self.log('swipe_identity_unavailable',message='滑动已成功且已确认 Reels；视频标识暂缺，跳过当前互动并继续浏览')
+                    return
                 self.log('swipe_pending',message='尚无可比较的视频标识，继续等待，不重复滑动')
                 self.wait(5);continue
             changed=before['key']!=after['key']
@@ -1467,14 +1586,20 @@ class Runner:
                 self.wait(5);continue
             if uncertain:self.swipes+=1;self.position+=1
             self.last_swipe_post=after;self.skip_interactions_once=True
+            self.observe_identity(after,advanced=True)
             self.log('swipe_verified' if changed else 'swipe_unchanged',
                      message='已通过视频控件确认切页，继续浏览' if changed else '滑动已响应，视频尚未变化，保留页面继续浏览')
             return
 
     def swipe(self, direction):
         before=self.read_reel()
+        self.observe_identity(before)
         transition_started=time.monotonic()
-        self.gesture(direction)
+        try:self.gesture(direction)
+        except Exception as exc:
+            if (isinstance(exc,TransportLost) or transport_error(exc)) and getattr(self,'_gesture_action_attempted',False):
+                raise RuntimeError('滑动已发送但响应无法确认，已停止且不会重复滑动；请检查手机页面后再开始。') from exc
+            raise
         self.swipes+=1
         self.position=max(0,self.position+(1 if direction=='up' else -1))
         self.log('swipe',direction=direction,message='回看上一条' if direction=='down' else '切换下一条')
@@ -1495,6 +1620,7 @@ class Runner:
             if after.get('key') and getattr(self,'_visible_video_key',None)==after['key']:
                 self._visible_video_since=min(self._visible_video_since,transition_started)
         self.last_swipe_post=after
+        self.observe_identity(after,advanced=direction=='up')
         self.log('page_checked',message='滑动后已确认仍在 Reels')
 
     def run(self):
@@ -1534,6 +1660,7 @@ class Runner:
                     try:
                         self.check()
                         post=self.read_reel()
+                        self.observe_identity(post)
                         self.current_post_key=post['key']
                         skip_interaction=self.skip_interactions_once or post['key'] in self.handoff_skip_keys
                         self.skip_interactions_once=False
@@ -1549,6 +1676,12 @@ class Runner:
                             self.refresh_required=True
                             raise NavigationLost('连续翻页后仍停留同一内容')
                         last_key=post['key']
+                        if self.identity_degraded:
+                            self.log('identity_browse',message=self.feature_state['identity']['reason'])
+                            self.wait(self.rng.uniform(2,4))
+                            self.swipe('up')
+                            self.back_depth=0
+                            continue
                         if self.watch_video(post,viewing_related) is True:
                             self.advance_after_read_timeout(post)
                             last_key=None
@@ -1590,6 +1723,7 @@ class Runner:
                                 self.check()
                                 self.last_swipe_post=None
                                 self.swipe('up');advanced+=1
+                                if self.identity_degraded:break
                                 if self.last_swipe_post and self.watch_related(self.last_swipe_post):
                                     self.log('watch_topic_found',message='连续翻页遇到相关内容，停下重新安排观看')
                                     break
@@ -1614,6 +1748,9 @@ class Runner:
                         continue
                     except NavigationLost as exc:
                         if self.in_interaction:raise RuntimeError('互动时页面变化，已停止以避免误操作') from exc
+                        self.skip_interactions_once=True
+                        self.video_watch=None
+                        self.current_post_key=None
                         self.diagnose('navigation',exc)
                         self.log('navigation_lost',message=str(exc))
                         try:self.recover_reels()
