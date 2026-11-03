@@ -171,6 +171,22 @@ class LocalWirelessStartup(unittest.TestCase):
  def test_diagnostic_write_failure_preserves_original_error(self):
   with patch.object(cn,'_ensure_wifi',side_effect=RuntimeError('original connection error')),patch.object(cn,'record_connection_failure',side_effect=OSError('disk full')):
    with self.assertRaisesRegex(RuntimeError,'original connection error'):cn.ensure_wifi(self.udid)
+ def test_recovered_connection_replaces_current_error_and_keeps_history(self):
+  dm.write_json(self.runtime/'connection-diagnostic.json',{'timestamp':10,'stage':'preflight','error':'handshake timeout','error_code':'connection'})
+  with patch.object(cn,'_ensure_wifi',return_value='http://127.0.0.1:50086'):
+   cn.ensure_wifi(self.udid)
+  current=cn.connection_status(self.udid)
+  self.assertEqual(current['status'],'connected');self.assertEqual(current['error'],'')
+  self.assertEqual(current['previous_failure']['error'],'handshake timeout')
+  self.assertEqual(current['selected_url'],'http://127.0.0.1:50086')
+  self.assertFalse((self.runtime/'setup-state.json').exists())
+  cn.record_connection_success(self.udid,{},current['selected_url'])
+  self.assertEqual(cn.connection_status(self.udid)['previous_failure']['timestamp'],10)
+ def test_later_failure_replaces_recovered_connection(self):
+  cn.record_connection_success(self.udid,{},'http://127.0.0.1:50086')
+  cn.record_connection_failure(self.udid,{},RuntimeError('new failure'))
+  self.assertEqual(cn.connection_status(self.udid)['status'],'failed')
+  self.assertEqual(cn.connection_status(self.udid)['error'],'new failure')
  def test_manual_stop_does_not_create_failure_report(self):
   from runner import Halt
   with patch.object(cn,'_ensure_wifi',side_effect=Halt('stop')),patch.object(cn,'record_connection_failure') as record:

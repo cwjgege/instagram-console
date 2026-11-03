@@ -68,11 +68,15 @@ class FastWireless(unittest.TestCase):
   self.scopes=[patch('connections.load',return_value={'mode':'wifi','fingerprint':'pin'}),patch('device_manager.signing_record',return_value={'udid':UDID,'bundle_id':BUNDLE}),patch('device_manager.expiry_state',return_value=('valid',24)),patch('device_manager.device_dir',return_value=self.base),patch('connections.saved_wifi_endpoints',return_value=[{'url':'http://192.168.31.9:8100','preview_url':'http://192.168.31.9:9100'}])]
   for scope in self.scopes:scope.start();self.addCleanup(scope.stop)
  def test_cached_endpoint_is_verified_without_launch_or_binding_mutation(self):
+  dm_failure={'error':'handshake timeout','timestamp':10}
+  (self.base/'connection-diagnostic.json').write_text(json.dumps(dm_failure))
   info={'url':'http://192.168.31.9:8100','fingerprint':'pin','bundle':BUNDLE,'ios':'26.6'}
   with patch('connections.checked',return_value=info) as checked,patch('connections.ensure_wifi') as full,patch('connections.save') as save,patch('controller_bridge.ensure') as launch:
    self.assertEqual(cn.quick_wifi(UDID),info['url']);checked.assert_called_once_with(info['url'],'pin',timeout=2)
    full.assert_not_called();save.assert_not_called();launch.assert_not_called()
   self.assertEqual(json.loads((self.base/'network-runtime.json').read_text())['fingerprint'],'pin')
+  current=cn.connection_status(UDID)
+  self.assertEqual(current['status'],'connected');self.assertEqual(current['previous_failure'],dm_failure)
  def test_wrong_fingerprint_never_uses_another_endpoint_or_launches(self):
   with patch('connections.checked',side_effect=cn.FingerprintMismatch('wrong')) as checked,patch('controller_bridge.ensure') as launch:
    with self.assertRaises(cn.FingerprintMismatch):cn.quick_wifi(UDID)

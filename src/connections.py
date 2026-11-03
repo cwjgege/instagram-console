@@ -276,6 +276,8 @@ def quick_wifi(udid,notify=lambda s:None,stop=None):
                 raise FingerprintMismatch('已缓存的无线地址签名不匹配，未接管该设备')
             if stop is not None and stop.is_set():raise Halt('已手动停止')
             dm.write_json(dm.device_dir(udid)/'network-runtime.json',{**info,'preview_url':candidate.get('preview_url','')})
+            try:record_connection_success(udid,{'stage':'cached_endpoint'},candidate['url'])
+            except OSError:pass
             notify('已重新核验原手机的现有无线通道，未启动或重签组件。')
             return candidate['url']
         except FingerprintMismatch:raise
@@ -302,7 +304,7 @@ def record_connection_failure(udid,trace,error):
     """Keep bounded transport evidence without collecting app contents or proxy credentials."""
     import device_manager as dm
     from app_paths import APP_VERSION
-    evidence={**trace,'app_version':APP_VERSION,'timestamp':time.time(),'error':str(error)[:2000],'error_code':getattr(error,'code',''),'routes':[]}
+    evidence={**trace,'status':'failed','app_version':APP_VERSION,'timestamp':time.time(),'error':str(error)[:2000],'error_code':getattr(error,'code',''),'routes':[]}
     for url in list(dict.fromkeys(trace.get('candidates',[])))[-3:]:
         try:
             validate_url(url);host=urlsplit(url).hostname
@@ -319,6 +321,29 @@ def record_connection_failure(udid,trace,error):
     path=dm.device_dir(udid)/'connection-diagnostic.json'
     dm.write_json(path,evidence)
     return path
+
+def connection_status(udid):
+    import device_manager as dm
+    try:
+        value=json.loads((dm.device_dir(udid)/'connection-diagnostic.json').read_text())
+        return value if isinstance(value,dict) else {}
+    except (OSError,ValueError):return {}
+
+def record_connection_success(udid,trace,url):
+    """Publish the latest verified transport outcome; keep the preceding failure as history.
+
+    This proves a WDA transport, not a completed Appium session or provisioning setup.
+    """
+    import device_manager as dm
+    from app_paths import APP_VERSION
+    previous=connection_status(udid)
+    failure=({key:previous[key] for key in ('timestamp','stage','error','error_code') if key in previous}
+             if previous.get('error') else previous.get('previous_failure'))
+    evidence={**trace,'status':'connected','selected_url':url,'timestamp':time.time(),'app_version':APP_VERSION}
+    dm.write_json(dm.device_dir(udid)/'connection-attempt.json',evidence)
+    current={**evidence,'stage':'connected','error':'','error_code':'','routes':[]}
+    if failure:current['previous_failure']=failure
+    dm.write_json(dm.device_dir(udid)/'connection-diagnostic.json',current)
 
 def prepare_wireless_xctestrun(derived,runtime,bundle,port,mjpeg):
     """Use this Mac's signed test host, with paths independent of spec location."""
@@ -403,8 +428,7 @@ def _ensure_wifi_attempt(udid,notify,stop,setting_override,recovery):
         # Preserve candidate failures even if a later development tunnel succeeds.
         try:
             import device_manager as dm
-            from app_paths import APP_VERSION
-            dm.write_json(dm.device_dir(udid)/'connection-attempt.json',{**trace,'selected_url':url,'timestamp':time.time(),'app_version':APP_VERSION})
+            record_connection_success(udid,trace,url)
         except OSError:pass
         return url
     except Halt:
@@ -419,8 +443,7 @@ def _ensure_wifi_attempt(udid,notify,stop,setting_override,recovery):
                 url=controller_bridge.ensure(udid,setting_override or load(udid),notify,stop)
                 try:
                     import device_manager as dm
-                    from app_paths import APP_VERSION
-                    dm.write_json(dm.device_dir(udid)/'connection-attempt.json',{**trace,'selected_url':url,'timestamp':time.time(),'app_version':APP_VERSION})
+                    record_connection_success(udid,trace,url)
                 except OSError:pass
                 return url
             except Halt:

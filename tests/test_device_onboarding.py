@@ -40,4 +40,24 @@ class Onboarding(unittest.TestCase):
   w=self.window()
   with patch('device_ui.ws.prepare') as prepare:w.finish_install({'udid':'A'*20,'ios':'16.7'},{},True)
   prepare.assert_not_called();self.assertEqual(w.events.get()[0],'installed');self.assertEqual(w.events.get()[0],'wireless_failed')
+ def test_new_verified_connection_clears_only_its_previous_transport_error(self):
+  w=self.window();w.last_result='handshake failed';w.status.get.return_value=w.last_result
+  failure={'timestamp':10,'error':w.last_result}
+  with patch('connections.connection_status',return_value=failure):w.remember_connection_error(w.last_result)
+  success={'status':'connected','timestamp':20,'previous_failure':failure}
+  with patch('connections.connection_status',return_value=success):w.refresh_connection_result()
+  self.assertIn('控制通道已恢复',w.last_result);self.assertIsNone(w._connection_error)
+ def test_recovery_does_not_hide_new_failure_other_device_or_unrelated_message(self):
+  for case in ('failure','old_success','other_device','unrelated','busy'):
+   with self.subTest(case=case):
+    w=self.window();w.last_result='handshake failed';w.status.get.return_value=w.last_result
+    udid=w.selected()['udid'];w._connection_error=(udid,10,w.last_result)
+    state={'status':'connected','timestamp':20,'previous_failure':{'timestamp':10}}
+    if case=='failure':state['status']='failed'
+    if case=='old_success':state['timestamp']=9
+    if case=='other_device':w.selected.return_value={'udid':'other'}
+    if case=='unrelated':w.status.get.return_value='安装失败'
+    if case=='busy':w.busy=True
+    with patch('connections.connection_status',return_value=state):w.refresh_connection_result()
+    w.status.set.assert_not_called()
 if __name__=='__main__':unittest.main()

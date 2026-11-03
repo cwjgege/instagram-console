@@ -3,6 +3,7 @@ import json
 import queue
 import subprocess
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk,messagebox
 from pathlib import Path
@@ -169,6 +170,32 @@ class DeviceWindow:
             and self.last_result==old.get('message')):
             self.last_result=state.get('message','控制组件已连接验证。')
             self.status.set(self.last_result)
+
+    def remember_connection_error(self,message):
+        import connections as cn
+        device=self.selected()
+        if not device:return
+        state=cn.connection_status(device['udid'])
+        if isinstance(state.get('error'),str) and state['error'] and state['error'] in message:
+            self._connection_error=(device['udid'],state.get('timestamp'),message)
+
+    def refresh_connection_result(self):
+        """Replace only this window's resolved transport error, including while browsing."""
+        context=self.__dict__.get('_connection_error')
+        if self.busy or not context:return
+        if time.monotonic()<self.__dict__.get('_connection_check_after',0):return
+        self._connection_check_after=time.monotonic()+1
+        udid,failed_at,message=context;device=self.selected()
+        if not device or device['udid']!=udid or self.last_result!=message or self.status.get()!=message:return
+        import connections as cn
+        state=cn.connection_status(udid)
+        if (state.get('status')!='connected' or not isinstance(failed_at,(int,float))
+            or not isinstance(state.get('timestamp'),(int,float)) or state['timestamp']<=failed_at
+            or not isinstance(state.get('previous_failure'),dict)
+            or state['previous_failure'].get('timestamp')!=failed_at):return
+        stamp=time.strftime('%H:%M:%S',time.localtime(state['timestamp']))
+        self.last_result='控制通道已恢复（'+stamp+'）；上次连接错误已解决。浏览任务状态请以设备工作区为准。'
+        self.status.set(self.last_result);self._connection_error=None
 
     def begin_add(self,device):
         store=self.panel.__dict__.get('store')
@@ -343,6 +370,7 @@ class DeviceWindow:
                 elif event=='cached_profiles':self.display_cached_profiles(*value)
                 elif event=='wireless_failed':
                     self.last_result=value;self.status.set(value)
+                    self.remember_connection_error(value)
                 elif event=='wireless_unplugged':
                     device,stop=value
                     if stop.is_set() or self.awaiting_wireless is not device:continue
@@ -362,8 +390,10 @@ class DeviceWindow:
                     self.show_device()
                 elif event=='error':
                     self.last_result=value;self.status.set(value)
+                    self.remember_connection_error(value)
                 else:self.status.set(value)
         except queue.Empty:pass
+        self.refresh_connection_result()
         self.window.after(200,self.poll)
 
     def close(self):
