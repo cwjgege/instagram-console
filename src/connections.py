@@ -489,7 +489,9 @@ def _ensure_wifi(udid,notify,stop,setting_override,trace):
     try:major=int(p.get('osVersionNumber','').split('.')[0])
     except ValueError:raise RuntimeError('未能读取手机系统版本，请重新检测。') from None
     if major<17:raise RuntimeError('iOS 16 本地无线自动启动尚未适配，请使用 USB 或远程已有 WDA 模式。')
-    if c.get('transportType')=='localNetwork' and major>=17:
+    if setting.get('wifi_backend')=='xcode' and c.get('transportType')!='localNetwork':
+        raise RuntimeError('Xcode 尚未确认此设备通过本地网络连接，无法验证纯 Wi-Fi 控制。')
+    if c.get('transportType')=='localNetwork' and major>=17 and setting.get('wifi_backend')!='xcode':
         import controller_bridge
         if controller_bridge.preferred(udid):return controller_bridge.ensure(udid,setting,notify,stop)
     derived=derived_path(udid)

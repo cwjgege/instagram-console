@@ -5,7 +5,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk,messagebox
+from tkinter import ttk,messagebox,filedialog
 from pathlib import Path
 from app_paths import DATA,FROZEN
 import wireless_setup as ws
@@ -43,6 +43,7 @@ class DeviceWindow:
         ttk.Button(row,text='重新检测连接',command=self.scan).pack(side='left')
         ttk.Button(row,text='打开 Xcode',command=self.open_xcode).pack(side='left',padx=10)
         ttk.Button(row,text='打开诊断日志',command=self.open_logs).pack(side='left')
+        ttk.Button(row,text='导出无线诊断',command=self.export_wireless).pack(side='left')
         ttk.Label(body,text='仅列出通过 USB 连接的 iPhone').pack(anchor='w')
         self.device=tk.StringVar();self.device_box=ttk.Combobox(body,textvariable=self.device,state='readonly')
         self.device_box.pack(fill='x',pady=(5,8));self.device_box.bind('<<ComboboxSelected>>',lambda _:self.show_device())
@@ -336,6 +337,18 @@ class DeviceWindow:
         ttk.Button(dialog,text='关闭',command=dialog.destroy).pack(pady=(0,12))
         self.status.set('已读取本机描述文件。')
 
+    def export_wireless(self):
+        device=self.selected()
+        udid=getattr(self,'wireless_diagnostic_udid',None) or (device['udid'] if device else self.panel.cfg.get('device_udid'))
+        report=ws.state(udid) if udid else {}
+        if not report:
+            messagebox.showinfo('无线诊断','尚无无线验证记录。',parent=self.window);return
+        filename=filedialog.asksaveasfilename(parent=self.window,initialdir=Path.home()/'Desktop',
+            initialfile='无线验证诊断.json',defaultextension='.json')
+        if filename:
+            try:Path(filename).write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+            except OSError as exc:messagebox.showerror('导出失败',str(exc),parent=self.window)
+
     def open_logs(self):
         device=self.selected();folder=dm.device_dir(device['udid']) if device else DATA
         folder.mkdir(parents=True,exist_ok=True);subprocess.Popen(['/usr/bin/open',str(folder)])
@@ -375,6 +388,7 @@ class DeviceWindow:
                     device,stop=value
                     if stop.is_set() or self.awaiting_wireless is not device:continue
                     self.awaiting_wireless=None;self.wireless_running=True
+                    self.wireless_diagnostic_udid=device['udid']
                     def job(device=device,stop=stop):
                         result=ws.verify(device['udid'],stop,lambda message:self.events.put(('status',message)))
                         self.events.put(('wireless_verified',result))

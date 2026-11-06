@@ -1445,7 +1445,17 @@ class Runner:
             self.search_stage('select_result')
             tree=self.search_results(term)
             nodes=[e for e in tree.iter() if e.get('visible')=='true']
-            candidates=[e for e in nodes if e.tag=='XCUIElementTypeCell'
+            # Account cards can embed video cells with the same identifier as the results grid.
+            parents={child:parent for parent in tree.iter() for child in parent}
+            account_videos=set()
+            for button in nodes:
+                if button.get('name')!='follow-button':continue
+                card=parents.get(button)
+                while card is not None and card.tag!='XCUIElementTypeCell':
+                    card=parents.get(card)
+                if card is not None:
+                    account_videos.update(e for e in card.iter() if e.get('name')=='media-discovery-cell')
+            candidates=[e for e in nodes if e not in account_videos and e.tag=='XCUIElementTypeCell'
                 and e.get('name')=='media-discovery-cell' and e.get('label','').startswith('Video by ')
                 and e.get('label') not in seen and float(e.get('y',0))>=143
                 and float(e.get('y',0))+float(e.get('height',0))<=850]

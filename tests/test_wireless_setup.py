@@ -32,9 +32,17 @@ class WirelessSetup(unittest.TestCase):
    self.assertEqual(ws.verify(ONE)['status'],'verified');self.assertEqual(helper.call_count,2);save.assert_called_once()
  def test_network_discovery_timeout_explains_and_preserves_connection(self):
   missing=RuntimeError('DeviceNotFoundError: Device not found: usbmux has no device matching udid over Network')
-  with patch.object(ws,'wired',return_value=False),patch.object(ws,'helper',side_effect=missing),patch.object(ws.time,'monotonic',side_effect=[0,31]),patch.object(ws.cn,'save') as save,self.assertRaisesRegex(RuntimeError,'未在无线网络发现'):
+  with patch.object(ws,'wired',return_value=False),patch.object(ws,'helper',side_effect=missing),patch.object(ws,'xcode_network_snapshot',return_value={'status':'not_found'}),patch.object(ws.time,'monotonic',side_effect=[0,0,31,31,31]),patch.object(ws.cn,'save') as save,self.assertRaisesRegex(RuntimeError,'未在无线网络发现'):
    ws.verify(ONE)
   save.assert_not_called();self.assertIn('无需重签名',ws.state(ONE)['message'])
+ def test_xcode_network_fallback_saves_only_verified_control(self):
+  missing=RuntimeError('DeviceNotFoundError: device not found by usbmux over Network')
+  bundle='com.igconsole.wda.example.xctrunner'
+  with patch.object(ws,'wired',return_value=False),patch.object(ws,'helper',side_effect=missing),patch.object(ws,'xcode_network_snapshot',return_value={'interface':'network','available':True}),patch.object(ws.time,'monotonic',side_effect=[0,0,31,31,32]),patch.object(ws.cn,'load',return_value={'mode':'usb'}),patch.object(ws.cn,'ensure_wifi',return_value='http://127.0.0.1:8100') as ensure,patch.object(ws.cn,'inspect',return_value={'fingerprint':'phone-one','bundle':bundle,'ios':'26.6'}),patch.object(dm,'signing_record',return_value={'bundle_id':bundle}),patch.object(ws.cn,'save') as save:
+   result=ws.verify(ONE)
+  self.assertFalse(result['location_verified'])
+  self.assertEqual(ensure.call_args.kwargs['setting_override']['wifi_backend'],'xcode')
+  self.assertEqual(save.call_args.args[1]['fingerprint'],'phone-one')
  def test_cancellation_never_switches_mode(self):
   stop=threading.Event();stop.set()
   with patch.object(ws.cn,'save') as save,self.assertRaisesRegex(RuntimeError,'取消'):ws.verify(ONE,stop)

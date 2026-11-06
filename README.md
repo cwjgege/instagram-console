@@ -30,9 +30,9 @@
 
 ## 下载与安装
 
-[下载 v1.2.44 安装包（Apple Silicon PKG）](https://github.com/cwjgege/instagram-console/releases/download/v1.2.44/Instagram-Console-1.2.44-AppleSilicon.pkg)
+[下载 v1.2.48 安装包（Apple Silicon PKG）](https://github.com/cwjgege/instagram-console/releases/download/v1.2.48/Instagram-Console-1.2.48-AppleSilicon.pkg)
 
-[查看 v1.2.44 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.44)
+[查看 v1.2.48 测试版说明](https://github.com/cwjgege/instagram-console/releases/tag/v1.2.48)
 
 [下载上一稳定版本](https://github.com/cwjgege/instagram-console/releases/latest/download/Instagram-Console-AppleSilicon.dmg)
 

@@ -40,29 +40,70 @@ def prepare(udid,notify=lambda text:None):
     except Exception as exc:
         save(udid,'failed','无线准备未完成：'+str(exc)[:500]);raise
 
+def xcode_network_snapshot(udid):
+    # CoreDevice can report an active network tunnel while xcdevice still reports USB.
+    try:
+        details=dm.coredevice(['device','info','details','--device',udid])
+        hardware=details.get('hardwareProperties',{})
+        connection=details.get('connectionProperties',{})
+        if (hardware.get('udid')==udid and connection.get('pairingState')=='paired'
+                and connection.get('transportType')=='localNetwork'
+                and connection.get('tunnelState')=='connected'):
+            return {'status':'found','interface':'network','available':True,'source':'coredevice'}
+    except (OSError,ValueError,KeyError,RuntimeError,subprocess.SubprocessError):
+        pass
+    try:
+        result=subprocess.run(['/usr/bin/xcrun','xcdevice','list','--timeout','5'],
+                              env=dm.child_env(),capture_output=True,text=True,timeout=10)
+        if result.returncode:
+            return {'status':'query_failed','exit_code':result.returncode,'error':result.stderr[-1000:]}
+        rows=json.loads(result.stdout)
+        target=udid.replace('-','').lower()
+        for row in rows:
+            if row.get('identifier','').replace('-','').lower()==target:
+                return {'status':'found','interface':row.get('interface'),'available':row.get('available')}
+        return {'status':'not_found'}
+    except (OSError,ValueError,subprocess.SubprocessError) as exc:
+        return {'status':'query_failed','error':str(exc)[:1000]}
+
 def _verify(udid,stop=None,notify=lambda text:None):
     stop=stop or threading.Event()
     def check():
         if stop.is_set():raise RuntimeError('已取消无线验证，连接方式未切换。')
         if wired(udid):raise RuntimeError('请先拔掉 USB，才能验证实际 Wi-Fi 连接。')
+    started=time.monotonic()
+    phase='preflight'
+    attempts=[]
+    snapshot=None
+    location_verified=True
     try:
         check();notify('正在验证拔线后的无线定位通道…')
+        phase='wireless_helper'
         deadline=time.monotonic()+30
         while True:
             try:
                 helper(udid,'--check-wireless');break
             except RuntimeError as exc:
+                attempts.append({'elapsed_ms':round((time.monotonic()-started)*1000),'error':str(exc)[:1000]})
                 text=str(exc).casefold()
                 missing=('devicenotfounderror' in text or 'device not found' in text) and ('usbmux' in text or 'over network' in text)
                 if not missing:raise
                 check()
                 if time.monotonic()>=deadline:
+                    snapshot=xcode_network_snapshot(udid)
+                    check()
+                    if snapshot.get('interface')=='network' and snapshot.get('available') is True:
+                        location_verified=False
+                        notify('Xcode 已通过网络发现此 iPhone，继续独立验证无线 WDA…')
+                        break
                     raise RuntimeError('拔掉 USB 后，电脑暂未在无线网络发现这台手机。签名安装结果不受此检查影响。请插回 USB，确认手机解锁、两端连接同一 Wi-Fi 且网络允许设备互相发现，再点击“准备无线连接（无需重签名）”；仍失败时查看无线诊断日志。') from exc
                 notify('正在等待手机出现在无线设备列表中…')
                 stop.wait(3);check()
         check()
+        phase='wireless_wda'
         notify('正在验证无线控制组件…')
         old=cn.load(udid);setting={'mode':'wifi','identifier_kind':'udid'}
+        if not location_verified:setting['wifi_backend']='xcode'
         if old.get('mode')=='wifi' and old.get('fingerprint'):setting['fingerprint']=old['fingerprint']
         url=cn.ensure_wifi(udid,notify,stop,setting_override=setting);info=cn.inspect(url)
         check()
@@ -71,9 +112,23 @@ def _verify(udid,stop=None,notify=lambda text:None):
         if not record or info['bundle'] not in {record.get('bundle_id'),str(record.get('bundle_id','')).removesuffix('.xctrunner')}:raise RuntimeError('无线控件与本机签名记录不匹配，未切换连接。')
         setting.update(fingerprint=info['fingerprint'],verified_ios=info['ios'],wda_url='',preview_url='')
         cn.save(udid,setting,merge_discovered_alias=True)
-        return save(udid,'verified','Wi-Fi 控制和定位通道已验证，已切换为本地 Wi-Fi。此次检查没有修改手机定位。')
+        message=('Wi-Fi 控制和定位通道已验证，已切换为本地 Wi-Fi。' if location_verified else
+                 'Wi-Fi 控制已验证并切换。无线定位辅助通道未通过验证。')
+        return save(udid,'verified',message,phase=phase,location_verified=location_verified,
+                    elapsed_ms=round((time.monotonic()-started)*1000),helper_attempts=attempts,xcode=snapshot)
     except Exception as exc:
-        save(udid,'failed','无线验证未完成：'+str(exc)[:500]+'；原连接方式保留，可插回 USB 重试。');raise
+        elapsed_ms=round((time.monotonic()-started)*1000)
+        if snapshot is None and phase=='wireless_helper' and attempts and not stop.is_set():
+            snapshot=xcode_network_snapshot(udid)
+        message=str(exc)
+        if phase=='wireless_helper' and snapshot and snapshot.get('interface')=='network' and snapshot.get('available') is True:
+            message='Xcode 已通过网络发现此 iPhone，但定位辅助通道预检失败，尚未验证无线 WDA。'
+        elif phase=='wireless_wda':
+            message='WDA 无线控制验证失败：'+message
+        save(udid,'failed','无线验证未完成：'+message[:500]+'；原连接方式保留，可插回 USB 重试。',
+             phase=phase,elapsed_ms=elapsed_ms,helper_attempts=attempts,xcode=snapshot,original_error=str(exc)[:1000])
+        if message!=str(exc):raise RuntimeError(message) from exc
+        raise
 
 def verify(udid,stop=None,notify=lambda text:None):
     with lock_device(udid):return _verify(udid,stop,notify)
