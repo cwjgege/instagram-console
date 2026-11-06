@@ -43,5 +43,7 @@ def main():
     values=plistlib.loads(info.read_bytes());values.update(CFBundleShortVersionString=version,CFBundleVersion=version,NSHighResolutionCapable=True,
         NSLocalNetworkUsageDescription='连接你选择并验证的局域网 iPhone，读取设备状态和手机预览，并运行你启动的控制任务。')
     info.write_bytes(plistlib.dumps(values));run(['/usr/bin/codesign','--force','--deep','--sign','-',app])
+    from build_pkg import build_pkg
     print(app)
+    print(build_pkg(app))
 if __name__=='__main__':main()

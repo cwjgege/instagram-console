@@ -1,0 +1,7 @@
+#!/bin/sh
+# Check all users and copies, including apps opened from Downloads.
+/usr/bin/pgrep -f '/Instagram 控制台[^/]*\.app/Contents/MacOS/Instagram 控制台$' >/dev/null
+case $? in
+    1) exit 0 ;;
+    *) echo '请完全退出 Instagram 控制台后重新运行安装器。' >&2; exit 1 ;;
+esac

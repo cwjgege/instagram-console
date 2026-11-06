@@ -76,11 +76,31 @@ def export(runtime,destination,include_screenshots=False):
         summary={k:v for k,v in raw.items() if k in COUNTERS or k in ('status','page_state')}
         summary['counts']={k:v for k,v in raw.get('counts',{}).items() if k in COUNTERS}
         summary['feature_enabled']={k:bool(v.get('enabled')) for k,v in raw.get('feature_state',{}).items() if k=='search'}
+    connection_events=[]
+    event_file=run/'events.jsonl'
+    fields={
+        'connection_attempt':('phase','force_new','quick'),
+        'connection_mode':('mode',),
+        'connection_phase':('phase',),
+        'connection_outcome':('phase','result','elapsed_ms','error_type','error_code'),
+    }
+    if event_file.is_file() and not event_file.is_symlink():
+        with event_file.open(encoding='utf-8',errors='replace') as stream:
+            for line in stream:
+                try:row=json.loads(line)
+                except ValueError:continue
+                if not isinstance(row,dict) or not isinstance(row.get('event'),str):continue
+                event=row['event']
+                if event in fields:
+                    connection_events.append({key:row[key] for key in ('time','event',*fields[event]) if key in row})
     manifest={'app_version':APP_VERSION,'exported_at':datetime.now().isoformat(timespec='seconds'),
         'screenshots_included':bool(include_screenshots and any(p.suffix in ('.png','.jpg') for p in files)),
         'summary':summary,'cases':sum(p.suffix=='.json' for p in files),
         'excluded':['config','API keys','device identifiers','raw logs','interaction ledger','post text','input values']}
     with zipfile.ZipFile(destination,'w',zipfile.ZIP_DEFLATED) as bundle:
+        if connection_events:
+            bundle.writestr('connection-events.jsonl',''.join(
+                json.dumps(row,ensure_ascii=False)+'\n' for row in connection_events))
         bundle.writestr('manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2))
         bundle.writestr('README.txt','本包仅包含最近一轮脱敏诊断。截图仅在明确选择时包含，截图可能含账号和视频内容。\n无异常的运行可能没有诊断案例。\n')
         for p in files:bundle.write(p,'diagnostics/'+p.name)

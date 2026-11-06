@@ -343,6 +343,13 @@ class Runner:
     def mobile(self, name, **args):
         try:return self.command('POST','/execute/sync',{'script':'mobile: '+name,'args':[args]})
         except Exception as exc:
+            if name=='activateApp' and isinstance(exc,ControlHTTPError):
+                message=str(exc).casefold()
+                if ('xctdaemonerrordomain code=41' in message
+                    and 'not authorized for performing ui testing actions' in message):
+                    self.log('session_stale',message='XCTest 拒绝启动 Instagram，当前控制会话需要重建',
+                             reason=diagnostics.redact(str(exc)))
+                    raise TransportLost('XCTest 拒绝当前会话执行 UI 测试操作') from exc
             if name=='activateApp' and transport_error(exc):
                 raise TransportLost('启动 Instagram 时控制连接失效，需要重新连接') from exc
             raise
@@ -438,11 +445,32 @@ class Runner:
             self.wait(min(3,max(0,end-time.monotonic())))
 
     def connect(self, force_new=False, quick=False):
+        started=time.monotonic()
+        self.connection_phase='configuration'
+        self.log('connection_attempt',phase=self.connection_phase,force_new=force_new,quick=quick)
+        try:
+            self._connect(force_new=force_new,quick=quick)
+        except Exception as exc:
+            self.log('connection_outcome',phase=self.connection_phase,
+                     result='stopped' if isinstance(exc,Halt) else 'failed',
+                     elapsed_ms=round((time.monotonic()-started)*1000),
+                     error_type=type(exc).__name__,error_code=getattr(exc,'code',''))
+            raise
+        self.log('connection_outcome',phase=self.connection_phase,result='session_ready',
+                 elapsed_ms=round((time.monotonic()-started)*1000))
+
+    def mark_connection_phase(self, phase):
+        self.connection_phase=phase
+        self.log('connection_phase',phase=phase)
+
+    def _connect(self, force_new=False, quick=False):
         self.log('connecting', message='正在连接指定 iPhone')
         import connections
         connection=connections.load(self.cfg['device_udid']) if self.managed else {'mode':'usb'}
         network=connection['mode']!='usb'
+        self.log('connection_mode',message='本次配置的连接方式',mode=connection['mode'])
         if not network:
+            self.mark_connection_phase('usb_discovery')
             if quick:
                 from device_manager import usb_serials
                 if self.cfg['device_udid'].replace('-','').lower() not in usb_serials():raise TransportLost('指定 USB 手机尚未接入')
@@ -451,6 +479,7 @@ class Runner:
             from device_manager import child_env,prepare_vendor,signing_record
             from runtime_manager import ensure_server,ensure_legacy
             notify=lambda message:self.log('connecting',message=message)
+            self.mark_connection_phase('appium_start')
             self.server_url=ensure_server(self.cfg['device_udid'],notify,self.stop)['url']
             self.device_env=child_env(prepare_vendor())
             record=signing_record(self.cfg['device_udid'])
@@ -459,9 +488,11 @@ class Runner:
                 if legacy!=(record.get('controller')=='legacy16'):
                     raise SetupError('controller_mismatch','手机系统与已配置的控制组件不匹配，请在此设备向导安装对应的 iOS 16 / 新版组件。','设备支持')
             if network:
+                self.mark_connection_phase('network_wda')
                 self.network_url=(connections.quick_wifi if quick else connections.ensure_wifi)(self.cfg['device_udid'],notify,self.stop)
                 force_new=True
             elif record and record.get('controller')=='legacy16':ensure_legacy(self.cfg['device_udid'],record,notify,self.stop)
+        self.mark_connection_phase('appium_status')
         try:
             self.http('GET','/status',timeout=3)
         except Exception:
@@ -500,6 +531,7 @@ class Runner:
             if old.get('network_url'):force_new=True
             if not force_new and caps.get('udid',caps.get('appium:udid')) == self.cfg['device_udid'] and (not self.managed or old.get('server_url')==self.server_url):
                 try:
+                    self.mark_connection_phase('cached_session_probe')
                     self.path = '/session/' + old['sessionId']
                     self.log('connecting',message='正在检查上次的手机控制连接…')
                     info=self.http('POST',self.path+'/execute/sync',{'script':'mobile: activeAppInfo','args':[{}]},timeout=15)
@@ -549,6 +581,7 @@ class Runner:
             caps.update({'appium:wdaLocalPort':ports['wda'],'appium:mjpegServerPort':ports['mjpeg'],'appium:wdaRemotePort':8100})
             if not network and record and record.get('controller')=='legacy16':caps['appium:webDriverAgentUrl']=f"http://127.0.0.1:{ports['wda']}"
         self.log('connecting',message='正在建立手机控制会话，停止时需等待当前连接命令结束…')
+        self.mark_connection_phase('new_session')
         positions=log_positions(self.runtime)
         try:value=self.http('POST','/session',payload,timeout=45 if quick else 240)
         except Exception as exc:
@@ -1634,6 +1667,7 @@ class Runner:
             return 'error'
         status='complete'
         device_guard=None
+        startup_complete=False
         try:
             self.runtime.joinpath('STOP').unlink(missing_ok=True)
             device_guard=lock_device(self.cfg['device_udid'])
@@ -1644,6 +1678,7 @@ class Runner:
                 self.recover_reels()
             except TransportLost:
                 self.recover_connection()
+            startup_complete=True
             self.deadline=time.monotonic()+self.seconds
             self.log('started',message='开始浏览',minutes=round(self.seconds/60,2))
             if not self.browse_only and self.cfg['comments_mode']=='ai' and self.cfg['enable_comments'] and not self.model_api_key:
@@ -1770,6 +1805,8 @@ class Runner:
             self.diagnose('fatal',e)
             status='error'
             message='手机控制连接中断，当前动作结果未确认，已停止且不会重发' if transport_error(e) else (str(e) or type(e).__name__)
+            if not startup_complete and transport_error(e):
+                message='启动阶段未能建立可用的手机控制连接：'+str(e)
             self.log('error',message=message,detail=str(e)[:1800],error_code=e.code if isinstance(e,SetupError) else '')
         finally:
             self.pause_enabled=False

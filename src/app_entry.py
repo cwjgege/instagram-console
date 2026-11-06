@@ -26,6 +26,33 @@ def self_test(output):
         result['location_backend']=json.loads(subprocess.check_output(worker_command()+['--self-test'],text=True,timeout=30))
     dm.write_json(Path(output),result)
 
+def offer_installed_copy(root, messagebox):
+    if sys.platform != 'darwin' or not getattr(sys, 'frozen', False):
+        return False
+    executable = Path(sys.executable).resolve()
+    running = next((parent for parent in executable.parents if parent.suffix == '.app'), None)
+    installed = Path('/Applications/Instagram 控制台.app')
+    if running is None or running == installed.resolve():
+        return False
+    import plistlib
+    try:
+        info = plistlib.loads((installed / 'Contents/Info.plist').read_bytes())
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return False
+    if info.get('CFBundleIdentifier') != 'local.igconsole.desktop':
+        return False
+    version = info.get('CFBundleShortVersionString', '未知')
+    root.withdraw()
+    if messagebox.askyesno('打开已安装版本',
+                          f'当前副本：{APP_VERSION}\n应用程序中的版本：{version}\n\n是否打开应用程序中的版本？',
+                          parent=root):
+        if subprocess.run(['/usr/bin/open', str(installed)], check=False).returncode == 0:
+            return True
+        messagebox.showerror('打开失败', '无法打开应用程序中的控制台。', parent=root)
+    root.deiconify()
+    return False
+
+
 def main():
     if getattr(sys,'frozen',False):
         import certifi
@@ -46,6 +73,8 @@ def main():
     import tkinter as tk
     from tkinter import messagebox
     root=tk.Tk()
+    if offer_installed_copy(root,messagebox):
+        lock.close();root.destroy();return
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:
         root.withdraw();messagebox.showinfo('Instagram 控制台 '+APP_VERSION,'控制台已有实例在运行。\n升级后请先完全退出正在运行的控制台，再打开 '+APP_VERSION+'。直接打开新安装包不会切换已运行的旧版。',parent=root)

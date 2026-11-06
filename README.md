@@ -41,7 +41,7 @@
 [查看版本说明](https://github.com/cwjgege/instagram-console/releases/latest)
 
 本仓库为公开仓库，安装包可直接下载，无需登录 GitHub。
-打开 DMG，将应用拖入 Applications。安装包内置 Python、Tcl/Tk、Pillow、Node、Appium 和 XCUITest 驱动。
+有 PKG 时优先双击 PKG 安装。先退出控制台，安装器会将应用安装到固定路径 `/Applications/Instagram 控制台.app`，并替换该路径中的旧版。旧版 ZIP 或 DMG 需要手动将应用拖入 Applications。安装包内置 Python、Tcl/Tk、Pillow、Node、Appium 和 XCUITest 驱动。
 仍需在 Mac 安装完整 Xcode，并按应用向导完成 USB 信任、开发者模式和本机签名。
 手机与 Mac 无需使用同一个 Apple ID。
 
@@ -146,7 +146,7 @@ python -m unittest discover -s tests
 python tools/build_mac.py
 ```
 
-构建脚本使用 npm 锁文件安装 Node 依赖，生成 `dist/Instagram 控制台.app`。
+构建脚本使用 npm 锁文件安装 Node 依赖，生成 `dist/Instagram 控制台.app` 和固定安装路径的 Apple Silicon PKG。
 该脚本是移植后的构建入口，尚未在第二台 Mac 验证；已发布 DMG 使用本机经过验证的构建环境产生。
 仓库不包含预编译运行环境、个人设备配置、API Key、Apple 签名凭据或运行日志。
 首次源码运行会由 `src/default-config.json` 生成本地 `src/config.json`；直接运行源码时还需配置本地设备控制服务，推荐用户使用 DMG。
