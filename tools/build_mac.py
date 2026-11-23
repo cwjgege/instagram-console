@@ -4,6 +4,17 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 BUILD=ROOT/'build';STAGE=BUILD/'stage';SOURCE=ROOT/'src';VENDOR=STAGE/'vendor'
 def run(args,**kwargs):return subprocess.run([str(a) for a in args],check=True,**kwargs)
+def keep_wda_ios_project_deployment_target(wda):
+    driver = wda / 'build/lib/xcodebuild.js'
+    source = driver.read_text()
+    setting = '            args.push(`${deploymentTargetPrefix}OS_DEPLOYMENT_TARGET=${versionMatch[1]}.${versionMatch[2]}`);'
+    if source.count(setting) != 1:
+        raise RuntimeError('Bundled WDA deployment target override changed. Review the iOS patch.')
+    # The device OS may be newer than the SDK. Keep the iOS project's minimum target.
+    replacement = "            if (deploymentTargetPrefix !== 'IPHONE') {\n" + '    ' + setting + '\n            }'
+    driver.write_text(source.replace(setting, replacement))
+
+
 def main():
     if sys.platform!='darwin' or platform.machine()!='arm64':raise SystemExit('Build requires Apple Silicon macOS.')
     import tkinter
@@ -23,7 +34,9 @@ def main():
     if (VENDOR/'legacy-wda').exists():shutil.rmtree(VENDOR/'legacy-wda')
     shutil.copytree(legacy/'package',VENDOR/'legacy-wda')
     from patch_wda_location import patch
-    patch(VENDOR/'node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent')
+    modern_wda=VENDOR/'node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent'
+    patch(modern_wda)
+    keep_wda_ios_project_deployment_target(modern_wda)
     patch(VENDOR/'legacy-wda')
     archive=STAGE/'vendor.tar.gz'
     with tarfile.open(archive,'w:gz',compresslevel=6) as bundle:
